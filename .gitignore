@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+runtime/
+build/
+dist/
+.env
+.env.local
+*.log
+
+# Secrets, editor leftovers and local packaging
+.env.*
+*.pem
+*.key
+.DS_Store
+*.egg-info/

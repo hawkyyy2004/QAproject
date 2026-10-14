@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QAproject · 语料工作台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#files"><span class="brand-mark">Q<span>↗</span></span><span>QAproject<small>语料处理工作台</small></span></a>
+    <div class="nav-caption">工作空间</div>
+    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button></nav>
+    <div class="sidebar-note"><div class="tiny-orbit">✦</div><strong>宽主题，细检索</strong><p>用稳定主题归类，用具体关键词找到每一份资料。</p><div class="note-line"></div><span>GLM 驱动 · 来源可追溯</span></div>
+    <div class="sidebar-footer"><span class="avatar">QA</span><div>本地工作区<small>初版 0.1</small></div><span class="green-dot"></span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <strong id="crumb">文件处理</strong></div><button class="connection" id="connection"><span class="green-dot"></span><span id="connection-text">正在连接本地服务</span><span data-icon="chevron"></span></button></header>
+    <main>
+      <section class="page-heading"><div><div class="eyebrow">DOCUMENT TO KNOWLEDGE</div><h1 id="page-title">文件处理</h1><p id="page-description">从一份资料开始，生成有依据、可分类的问答。</p></div></section>
+      <section id="files-view">
+        <div class="stats" id="stats"></div>
+        <section class="upload-card" id="drop-zone">
+          <div class="upload-visual"><div class="paper paper-back"></div><div class="paper paper-front"><span data-icon="upload"></span><i></i><i></i></div><span class="plus-bubble">+</span></div>
+          <div class="upload-copy"><div class="upload-title">文件解析</div><p>拖拽文件到此处，或选择本机资料。支持 PDF、图片、CSV 和文本。</p><div class="upload-hints"><span>✦ 图文一起读</span><span>◈ 优先归入已有主题</span><span>✓ 六字段 QA</span></div></div>
+          <div class="upload-action"><button class="button primary" id="choose-files"><span data-icon="plus"></span>选择文件</button><span id="upload-limit">每份最多 25 MB · PDF 页数不限</span></div>
+          <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" multiple hidden>
+        </section>
+        <div class="flow-strip"><span><b>01</b> 读取与定位</span><i>→</i><span><b>02</b> 梗概与宽主题</span><i>→</i><span><b>03</b> 生成与审核</span><i>→</i><span><b>04</b> 核对后入库</span><div class="flow-end">单一证据 · 原图保留</div></div>
+        <section class="table-card"><div class="section-toolbar"><div><h2>处理记录 <span id="document-count">0</span></h2><p>点击文件，查看梗概、原始证据和六字段问答。</p></div><div class="toolbar-actions"><div class="small-search"><span data-icon="search"></span><input id="file-filter" placeholder="查找文件名称" aria-label="查找文件名称"></div><button class="button secondary" id="export-all"><span data-icon="download"></span>导出 QA</button></div></div><div class="table-scroll"><table><thead><tr><th>文件与梗概</th><th>正式主题</th><th>处理状态</th><th>QA</th><th></th></tr></thead><tbody id="document-rows"></tbody></table></div><div class="table-footer"><span id="table-footnote">演示资料与真实资料独立保存</span><span><span class="green-dot"></span>数据保存在本机</span></div></section>
+      </section>
+      <section id="search-view" hidden>
+        <section class="search-hero"><div class="search-symbol" data-icon="search"></div><h2>从一个词，找到相关资料</h2><p>搜索正式主题、别名或具体关键词。细分词用于检索，不自动创建新主题。</p><div class="search-input-wrap"><span data-icon="search"></span><input id="theme-query" placeholder="输入主题名称、简称或具体关键词" aria-label="搜索主题"><button id="search-button" class="button primary">搜索</button></div><div class="suggestions" id="search-suggestions" hidden></div></section>
+        <div class="search-summary"><h2 id="search-summary">主题与涵盖文件</h2><span>主题归类与细分方向分别保存</span></div><div id="search-results"></div>
+      </section>
+      <footer class="main-footer"><span>QAproject <b>·</b> 公司 GLM 接口</span><span>文件处理 / 主题模糊搜索</span></footer>
+    </main>
+  </div>
+  <div id="drawer-overlay" class="drawer-overlay" hidden><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><span class="eyebrow">DOCUMENT DETAIL</span><h2 id="drawer-title"></h2></div><button id="close-drawer" class="icon-button" aria-label="关闭详情">×</button></div><div id="drawer-body" class="drawer-body"></div></aside></div>
+  <div id="connection-popover" class="connection-popover" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

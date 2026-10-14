@@ -1,0 +1,7 @@
+fastapi==0.128.8
+uvicorn==0.39.0
+httpx==0.28.1
+python-multipart==0.0.20
+PyMuPDF==1.26.5
+reportlab==5.0.1
+pytest==8.4.2
