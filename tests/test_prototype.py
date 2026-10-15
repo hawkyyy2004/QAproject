@@ -78,11 +78,15 @@ def fake_provider(request):
         result={'summary':'变量温度的测量示例，明确数值与单位。','topics':[{'name':'海洋观测','keywords':['温度'],'unit_ids':[u['id'] for u in payload['units']]}]}
     elif 'candidates' in payload:
         result={'checks':[{'candidate_id':c['candidate_id'],'supported':True,'independent':True,'scope_correct':True,
-            'knowledge_value':True,'distinct':True,'topic_correct':True,'note':'逐项对照变量、时期与单位。'} for c in payload['candidates']]}
+            'knowledge_value':True,'distinct':True,'topic_correct':True,'language_correct':True,
+            'translation_consistent':True,'note':'逐项对照变量、时期与单位及双语等义。'} for c in payload['candidates']]}
     else:
         unit=payload['units'][0]
-        result={'qas':[{'unit_id':unit['id'],'topic':'海洋观测','input':'在演示海域 A 的 2025 年 1 月观测示例中，温度是多少？',
-            'thinking':'示例给出温度为 15 摄氏度。','output':'15 摄氏度。','language':'zh'}],'skipped':['仅一个可靠考点，不补齐数量。']}
+        result={'pairs':[{'unit_id':unit['id'],'topic':'海洋观测',
+            'zh':{'input':'在演示海域 A 的 2025 年 1 月观测示例中，温度是多少？','thinking':'示例给出温度为 15 摄氏度。','output':'15 摄氏度。'},
+            'en':{'input':'What was the temperature in synthetic sea area A in January 2025?',
+                  'thinking':'The synthetic record gives a temperature of 15 degrees Celsius.','output':'15 degrees Celsius.'}}],
+            'skipped':['仅一个可靠考点，不补齐数量。']}
     return httpx.Response(200,json={'id':'mock-request','choices':[{'finish_reason':'stop','message':{'content':encode(result)}}],'usage':{'total_tokens':100}})
 
 
@@ -98,7 +102,7 @@ def test_pipeline_review_and_idempotent_commit(tmp_path,monkeypatch):
     worker.process(task)
     doc=store.document(doc_id)
     assert doc['status']=='waiting_review',doc['error']
-    assert len(doc['candidates'])==1 and doc['qa_count']==0
+    assert len(doc['candidates'])==2 and doc['bilingual_count']==1 and doc['qa_count']==0
     c=doc['candidates'][0]
     with pytest.raises(ValueError):approve(store,c['id'],False,c['row_hash'])
     with pytest.raises(ValueError):approve(store,c['id'],True,'wrong-hash')

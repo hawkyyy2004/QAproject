@@ -89,7 +89,11 @@ class GLMClient:
             stats['output_chars'] = len(raw)
             if raw.startswith('```') and raw.endswith('```'):
                 raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-            result = json.loads(raw)
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as error:
+                stats['json_error'] = {'line':error.lineno,'column':error.colno,'offset':error.pos,'reason':error.msg}
+                raise failed('公司模型未返回可解析的完整 JSON；未提交候选。', 'json') from None
             if not isinstance(result, dict):
                 raise failed('模型输出须为 JSON 对象，未提交候选。', 'json')
             stats['seconds'] = round(time.perf_counter()-start, 3)
@@ -104,12 +108,20 @@ ANALYZE = '''返回 {"summary":"简短梗概", "topics":[{"name":"规范宽主�
 关键词不逐词创建主题；地区、年份、指标、单次算法不单独建主题。只有确实不可覆盖的新领域才建议新宽主题。
 每个主题必须列实际支持的单元。不存在实质知识时 topics 可为空。图像识别语言以原图为准。'''
 
-GENERATE = '''返回 {"qas":[{"unit_id":"一个合法单元ID", "topic":"一个给定宽主题名称", "input":"问题", "thinking":"简短依据摘要", "output":"答案", "language":"zh或en"}], "skipped":["原因"]}。
-qas 数量不超过 target。input 写清对象与范围；thinking 用一句话、不超过60字；output 只回答所问知识、不重复背景、不超过200字。skipped 最多3项短理由。
+GENERATE = '''返回 {"pairs":[{"unit_id":"一个合法单元ID", "topic":"一个给定宽主题名称", "zh":{"input":"中文问题", "thinking":"中文简短依据摘要", "output":"中文答案"}, "en":{"input":"English question", "thinking":"Brief evidence summary in English", "output":"English answer"}}], "skipped":["原因"]}。
+严格输出合法JSON：所有字符串中的双引号须转义；公式优先用Unicode文本，反斜杠须按JSON转义；不使用尾逗号、不输出注释。
+pairs 数量不超过 target，target 按知识点/双语组计，不按语言行计。每组必须同时包含 zh、en 的三个非空字符串字段。
+先按原文确定一个可靠知识点，再直接给出中英等义版本，不翻译全文、不新增事实。两种语言都必须是可独立理解的完整问答，不能只返回译文说明。
+数字、单位、公式、专名、对象、时间、范围、否定、因果强度和不确定性必须一致，不能将译文当成另一个考点。
+input 写清对象与范围；thinking 各用一句简短依据摘要，中文尽量40字内、英文25词内；output 优先用1—2句直接回答，保留必要限定、单位与不确定性，不重复问题和背景，中文不超过200字、英文不超过140词。skipped 最多3项短理由。
 不输出文件路径和来源编号，由程序组装。不得一条答案综合多个单元。不要重复 existing_questions 的考点。
-一个主题可以多个不同知识点，不要求每主题达到目标。图像独立单元的语言依实际图中文字决定。'''
+一个主题可以多个不同知识点，不要求每主题达到目标。不论证据原语言，均须给出中英版本；图片题必须对照实际图片。'''
 
-REVIEW = '''返回 {"checks":[{"candidate_id":"原候选ID", "supported":true, "independent":true, "scope_correct":true, "knowledge_value":true, "distinct":true, "topic_correct":true, "note":"对应原文/图像的具体核查说明"}]}。
+REVIEW = '''返回 {"checks":[{"candidate_id":"原审核组ID", "supported":true, "independent":true, "scope_correct":true, "knowledge_value":true, "distinct":true, "topic_correct":true, "language_correct":true, "translation_consistent":true, "note":"对应原文/图像的具体核查说明"}]}。
+每个 candidates 元素是一个审核组，versions 包含同一知识点的中英两条六字段记录；历史单语组只有一个版本。按组返回一个共同结论，两种语言均逐条对照同一原证据，任一版本有问题即相应检查为 false。
+language_correct 检查每个版本 input、thinking、output 的语言与 zh/en 标签相符；允许保留必要的专名和公式。
+translation_consistent 检查两个版本的问题、依据和答案含义一致，数字、单位、公式、专名、范围、否定和不确定性均无变化；历史单语组此项填 true。
+同组中英版本是同一个考点，不判为彼此重复；不同组和 compare_questions 中的任一语言仍须排除重复考点。
 每条 note 不超过60字；只输出 checks，不重复问题、答案或整段原文。
 逐条审核，不默认通过。检查所有数字、单位、关系、条件。compare_questions 是同文档其他问题，用于检测考点重复。
 问题中的地点、研究对象及答案中的每个公式也须由其指定 unit 支持。若 note 提到超出本unit、未在本unit或无法核实，supported 或 scope_correct 必须为 false，不可自相矛盾地判通过。

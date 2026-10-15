@@ -14,6 +14,12 @@
   "analysis_concurrency": 2,
   "generation_batch_size": 3,
   "analysis_max_tokens": 2048,
-  "generation_max_tokens": 4096,
-  "review_max_tokens": 2048
+  "generation_max_tokens": 6144,
+  "review_max_tokens": 2048,
+  "semantic_search": {
+    "enabled": true,
+    "model_dir": "runtime/models/bge-small-zh-v1.5",
+    "model_id": "bge-small-zh-v1.5-onnx-int8-cls-v1",
+    "min_similarity": 0.65
+  }
 }

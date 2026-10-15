@@ -61,6 +61,13 @@ class Store:
               UNIQUE(document_id,fingerprint));
             CREATE TABLE IF NOT EXISTS qas(
               id TEXT PRIMARY KEY REFERENCES candidates(id), row_json TEXT, created REAL);
+            CREATE TABLE IF NOT EXISTS qa_pairs(
+              id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id), created REAL);
+            CREATE TABLE IF NOT EXISTS candidate_pairs(
+              candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),
+              pair_id TEXT NOT NULL REFERENCES qa_pairs(id),
+              language TEXT NOT NULL CHECK(language IN ('zh','en')),
+              UNIQUE(pair_id,language));
             CREATE TABLE IF NOT EXISTS tasks(
               id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
               status TEXT, worker TEXT, lease_until REAL DEFAULT 0,
@@ -70,7 +77,12 @@ class Store:
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);
             CREATE INDEX IF NOT EXISTS candidate_docs ON candidates(document_id);
+            CREATE INDEX IF NOT EXISTS pair_docs ON qa_pairs(document_id);
             ''')
+            if db.execute('PRAGMA user_version').fetchone()[0] < 1:
+                db.execute('PRAGMA user_version=1')
+            if 'review_candidate_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
+                db.execute('ALTER TABLE tasks ADD COLUMN review_candidate_id TEXT REFERENCES candidates(id)')
             if 'unit_count' not in {r['name'] for r in db.execute('PRAGMA table_info(documents)')}:
                 db.execute('ALTER TABLE documents ADD COLUMN unit_count INTEGER DEFAULT 0')
                 db.execute('UPDATE documents SET unit_count=json_array_length(units)')
@@ -152,8 +164,10 @@ class Store:
             item['topics'] = [dict(x, keywords=json.loads(x['keywords']), unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
                 'SELECT t.*,dt.keywords,dt.unit_ids FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE document_id=?', (doc_id,))]
             item['candidates'] = [dict(x, row=json.loads(x['row_json']), review=json.loads(x['review'])) for x in db.execute(
-                'SELECT * FROM candidates WHERE document_id=? ORDER BY created', (doc_id,))]
+                '''SELECT c.*,p.pair_id FROM candidates c LEFT JOIN candidate_pairs p ON p.candidate_id=c.id
+                   WHERE c.document_id=? ORDER BY c.created,c.rowid''', (doc_id,))]
             item['qa_count'] = db.execute('SELECT COUNT(*) FROM qas q JOIN candidates c ON q.id=c.id WHERE c.document_id=?', (doc_id,)).fetchone()[0]
+            item.update(self.pair_counts(db, doc_id))
             item['assets'] = [dict(x) for x in db.execute('SELECT * FROM assets WHERE document_id=?', (doc_id,))]
         for candidate in item['candidates']:
             candidate.pop('row_json', None)
@@ -174,10 +188,26 @@ class Store:
                     FROM document_topics dt JOIN topics t ON t.id=dt.topic_id'''):
                     items[r['document_id']]['topics'].append(
                         {'id':r['id'], 'name':r['name'], 'keywords':json.loads(r['keywords'])})
+                for item in items.values():
+                    item.update(self.pair_counts(db, item['id']))
             return list(items.values())
         with self.connect() as db:
             ids = [r[0] for r in db.execute('SELECT id FROM documents ORDER BY created DESC')]
         return [self.document(i) for i in ids]
+
+    @staticmethod
+    def pair_counts(db, doc_id):
+        # Count metadata only: list/search must never decode answers or evidence.
+        counts = db.execute('''SELECT COUNT(*) AS pair_count,
+            COALESCE(SUM(active=2),0) AS bilingual_count,
+            COALESCE(SUM(committed=2),0) AS qa_pair_count FROM (
+              SELECT p.id,SUM(c.status!='rejected') AS active,COUNT(q.id) AS committed
+              FROM qa_pairs p JOIN candidate_pairs m ON m.pair_id=p.id
+              JOIN candidates c ON c.id=m.candidate_id LEFT JOIN qas q ON q.id=c.id
+              WHERE p.document_id=? GROUP BY p.id)''', (doc_id,)).fetchone()
+        legacy = db.execute('''SELECT COUNT(*) FROM candidates c LEFT JOIN candidate_pairs m ON m.candidate_id=c.id
+            WHERE c.document_id=? AND m.candidate_id IS NULL''', (doc_id,)).fetchone()[0]
+        return dict(counts, legacy_count=legacy)
 
     def update_document(self, doc_id, **values):
         allowed = {'status', 'summary', 'error', 'pages', 'units', 'seconds', 'coverage', 'progress', 'timings'}
@@ -241,4 +271,13 @@ class Store:
             if matched:
                 results.append({'topic': topic, 'terms': sorted(terms), 'documents': matched,
                                 'reason': '主题或别名' if exact_topic else '具体检索方向'})
+        if query:
+            def match_rank(result):
+                topic = result['topic']
+                if normalized(topic['name']) == query:
+                    return 0
+                if query in [normalized(a) for a in topic['aliases']]:
+                    return 1
+                return 2 if result['reason'] == '主题或别名' else 3
+            results.sort(key=lambda r: (match_rank(r), r['topic']['name']))
         return results

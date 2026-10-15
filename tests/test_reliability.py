@@ -6,7 +6,7 @@ import pytest
 
 from qaproject.app import create_app
 from qaproject.glm import GLMClient, ProviderError
-from qaproject.pipeline import Worker, CHECKS, review_note_flags
+from qaproject.pipeline import Worker, CHECKS, BILINGUAL_CHECKS, review_note_flags
 from qaproject.settings import settings
 from qaproject.parsers import text_alternatives
 from qaproject.store import Store, digest
@@ -38,6 +38,19 @@ def test_contradictory_review_note_is_not_accepted():
     assert review_note_flags('该公式超出本unit文本。')
     assert review_note_flags('地点未在本unit提供。')
     assert not review_note_flags('数值、对象及范围均与原文一致。')
+
+
+def test_json_error_keeps_position_without_exposing_raw_response(monkeypatch):
+    raw='{"pairs":[private raw answer}'
+    real_client=httpx.Client
+    monkeypatch.setattr('qaproject.glm.httpx.Client',lambda **kw:real_client(transport=httpx.MockTransport(
+        lambda request:httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':raw}}]}))))
+    with pytest.raises(ProviderError) as caught:
+        GLMClient(settings(),key='test-placeholder').call('Return JSON',{})
+    error=caught.value
+    assert error.code=='json' and error.stats['json_error']['offset']>0
+    assert error.stats['json_error']['line']==1
+    assert raw not in str(error)+json.dumps(error.stats)
 
 
 def test_text_view_preserves_frozen_image_and_true_source():
@@ -82,15 +95,17 @@ def test_failed_review_resumes_at_five_without_repeating_generation(tmp_path, mo
             calls['review'] += 1
             if calls['review']==1:
                 raise ProviderError('接口超时，候选保留。','timeout',{'seconds':0.01,'finish_reason':'unknown'})
-            result = {'checks':[dict(candidate_id=c['candidate_id'],note='对照证据与范围。',**{k:True for k in CHECKS})
+            result = {'checks':[dict(candidate_id=c['candidate_id'],note='对照证据与范围及双语。',**{k:True for k in CHECKS+BILINGUAL_CHECKS})
                                 for c in payload['candidates']]}
         else:
             calls['generation'] += 1
             assert payload['target']<=3
-            offset = len(payload['existing_questions'])
-            result = {'qas':[{'unit_id':units[0]['id'],'topic':'海洋观测',
-                             'input':f'演示海域 A 在 2025 年 1 月的温度是多少（测试考点 {offset+n}）？',
-                             'thinking':'示例记录温度为15摄氏度。','output':'15摄氏度。','language':'zh'}
+            offset = len(payload['existing_questions'])//2
+            result = {'pairs':[{'unit_id':units[0]['id'],'topic':'海洋观测',
+                             'zh':{'input':f'演示海域 A 在 2025 年 1 月的温度是多少（测试考点 {offset+n}）？',
+                                   'thinking':'示例记录温度为15摄氏度。','output':'15摄氏度。'},
+                             'en':{'input':f'What was the temperature in synthetic sea area A in January 2025 (test point {offset+n})?',
+                                   'thinking':'The synthetic record gives 15 degrees Celsius.','output':'15 degrees Celsius.'}}
                              for n in range(payload['target'])], 'skipped':[]}
         return result, {'seconds':0.01, 'model':'mock'}
 
@@ -98,7 +113,7 @@ def test_failed_review_resumes_at_five_without_repeating_generation(tmp_path, mo
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     failed = store.document(doc_id)
-    assert failed['status']=='failed' and len(failed['candidates'])==3
+    assert failed['status']=='failed' and len(failed['candidates'])==6 and failed['bilingual_count']==3
     assert all(not c['review'] and c['status']=='needs_review' for c in failed['candidates'])
     assert 'reviewing' in failed['timings']
 
@@ -111,7 +126,7 @@ def test_failed_review_resumes_at_five_without_repeating_generation(tmp_path, mo
     worker.process(store.claim(worker.name))
     completed = store.document(doc_id)
     assert completed['status']=='waiting_review'
-    assert len(completed['candidates'])==5 and completed['qa_count']==0
+    assert len(completed['candidates'])==10 and completed['qa_count']==0 and completed['bilingual_count']==5
     assert all(c['review'] and c['status']=='pending' for c in completed['candidates'])
     assert calls=={'analysis':1,'generation':2,'review':3}
     assert set(completed['timings'])=={'parsing','analyzing','generating','reviewing'}

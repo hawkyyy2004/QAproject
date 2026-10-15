@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import secrets
+import time
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -14,6 +15,7 @@ from .demo import seed_demo
 from .pipeline import Worker, approve, reject
 from .settings import ROOT, FIELDS, settings, api_key
 from .store import Store, uid
+from .semantic import SemanticSearch, SearchCoordinator
 
 
 class CommitBody(BaseModel):
@@ -27,18 +29,26 @@ def create_app(runtime=None, seed=False, workers=True):
     if seed:
         stores['demo']=Store(runtime/'demo')
         seed_demo(stores['demo'])
-    runners = [Worker(store) for store in stores.values()] if workers else []
+    searches = {mode: SemanticSearch(store) for mode, store in stores.items()}
+    search_runner = SearchCoordinator(searches.values())
+    runners = [Worker(store, before_process=search_runner.interrupt) for store in stores.values()] if workers else []
     session = secrets.token_urlsafe(24)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
         for worker in runners: worker.start()
-        yield
-        for worker in runners: worker.stop.set()
+        if workers: search_runner.start()
+        try:
+            yield
+        finally:
+            for worker in runners: worker.stop.set()
+            search_runner.close()
 
     app=FastAPI(title='QAproject',lifespan=lifespan)
     app.state.stores=stores
     app.state.session=session
+    app.state.searches=searches
+    app.state.search_runner=search_runner
 
     @app.middleware('http')
     async def local_access(request, call_next):
@@ -84,6 +94,12 @@ def create_app(runtime=None, seed=False, workers=True):
     def search(q='',mode='live'):
         if len(q)>200: raise HTTPException(400,'查询过长')
         return workspace(mode).search(q)
+
+    @app.get('/api/search/semantic')
+    def semantic_search(q='',mode='live'):
+        if len(q)>200: raise HTTPException(400,'查询过长')
+        workspace(mode)
+        return searches[mode].recommend(q)
 
     @app.post('/api/imports')
     async def imports(request:Request,mode='live'):
@@ -134,6 +150,27 @@ def create_app(runtime=None, seed=False, workers=True):
         if mode=='demo': raise HTTPException(400,'演示记录不执行正式审核')
         return reject(workspace(mode),candidate_id,body.expected_hash)
 
+    @app.post('/api/candidates/{candidate_id}/rereview')
+    def rereview(candidate_id,body:CommitBody,mode='live'):
+        if mode!='live': raise HTTPException(400,'测试样例不执行正式审核')
+        store=workspace(mode)
+        with store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            c=db.execute('SELECT * FROM candidates WHERE id=?',(candidate_id,)).fetchone()
+            if not c or c['row_hash']!=body.expected_hash: raise ValueError('候选版本已变更，请刷新。')
+            if c['status'] in ('approved','rejected'): raise ValueError('该候选已完成处理，无法重新核验。')
+            status=db.execute('SELECT status FROM documents WHERE id=?',(c['document_id'],)).fetchone()[0]
+            if status not in ('waiting_review','completed_under_min','completed'):
+                raise ValueError('请先等待文件处理完成；失败文件请使用重试恢复原任务。')
+            if db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(c['document_id'],)).fetchone():
+                raise ValueError('该文件正在处理，请等待当前任务完成。')
+            db.execute('INSERT INTO tasks(id,document_id,status,review_candidate_id) VALUES(?,?,?,?)',
+                       (uid(),c['document_id'],'queued',candidate_id))
+            db.execute("UPDATE documents SET status='queued',progress='等待重新核验本组' WHERE id=?",(c['document_id'],))
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),c['document_id'],'rereview_requested',
+                       json.dumps({'candidate_id':candidate_id,'row_hash':body.expected_hash}),time.time()))
+        return {'queued':True}
+
     @app.post('/api/documents/{doc_id}/retry')
     def retry(doc_id,mode='live'):
         store=workspace(mode)
@@ -146,18 +183,21 @@ def create_app(runtime=None, seed=False, workers=True):
         return {'queued':True}
 
     @app.get('/api/export')
-    def export(mode='live',topic_id=None,document_id=None):
+    def export(mode='live',topic_id=None,document_id=None,language=None):
+        if language not in (None,'zh','en'):
+            raise HTTPException(400,'导出语言仅支持 zh 或 en；不传则导出全部。')
         store=workspace(mode)
         with store.connect() as db:
             query='SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id WHERE 1=1'
             args=[]
             if topic_id: query+=' AND c.topic_id=?';args.append(topic_id)
             if document_id: query+=' AND c.document_id=?';args.append(document_id)
+            if language: query+=" AND json_extract(q.row_json,'$.language')=?";args.append(language)
             rows=[json.loads(r[0]) for r in db.execute(query+' ORDER BY q.created',args)]
         content=io.StringIO(newline='')
         writer=csv.DictWriter(content,fieldnames=FIELDS)
         writer.writeheader();writer.writerows(rows)
-        name='demo-QA.csv' if mode=='demo' else 'QA.csv'
+        name=('demo-QA' if mode=='demo' else 'QA')+('-'+language if language else '')+'.csv'
         return Response(content.getvalue().encode('utf-8-sig'),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="{name}"'})
 
     app.mount('/',StaticFiles(directory=ROOT/'web',html=True),name='web')
