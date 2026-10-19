@@ -221,13 +221,13 @@ def compact_units(units):
 
 def content_facts(result, group):
     """Check compact batch notes cover every unit, without per-unit prose overhead."""
-    items = result.get('facts')
+    items = result.get('facts') if isinstance(result,dict) else None
     allowed = {u['id'] for u in group}
     seen = []
     if not isinstance(items,list):
         raise ValueError('内容要点未完整对应全部证据，系统保留已完成批次以便恢复。')
     for fact in items:
-        if not isinstance(fact,dict) or not isinstance(fact.get('focus'),str) or len(fact['focus'])>600:
+        if not isinstance(fact,dict) or not isinstance(fact.get('focus'),str) or not fact['focus'].strip() or len(fact['focus'])>600:
             raise ValueError('内容要点格式无效。')
         refs = fact.get('unit_ids',[fact.get('unit_id')])
         if not isinstance(refs,list) or not refs or any(not isinstance(x,str) or x not in allowed for x in refs):
@@ -302,6 +302,7 @@ class Worker:
 
         def call_cached(kind, instruction, payload, group):
             store.task_update(task['id'], self.name, kind)
+            facts_request = kind=='analysis' and payload.get('analysis_phase')=='facts'
             token_limit = config.get(kind+'_max_tokens', config['max_output_tokens'])
             provider_config = {k:config.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')}
             request = {'kind':kind, 'prompt':instruction, 'payload':payload,
@@ -314,8 +315,20 @@ class Worker:
                       for n in dict.fromkeys([token_limit, 2048, 6144, 8192])]
             for cached in [file, *legacy]:
                 if cached.is_file():
+                    if facts_request:
+                        try:
+                            cached_result = json.loads(cached.read_text())['result']
+                            content_facts(cached_result, group)
+                        except (ValueError, KeyError, TypeError):
+                            # Keep the rejected response for diagnosis, but never reuse it.
+                            cached.replace(cached.with_suffix('.invalid-'+uid()+'.json'))
+                            store.event(doc['id'], 'cache_invalid', {'run_id':run_id, 'stage':kind,
+                                        'signature':cached.stem, 'code':'facts', 'units':len(group)})
+                            continue
+                    else:
+                        cached_result = json.loads(cached.read_text())['result']
                     store.event(doc['id'], 'cache_hit', {'run_id':run_id, 'stage':kind, 'signature':cached.stem})
-                    return json.loads(cached.read_text())['result']
+                    return cached_result
             plan = file.with_suffix('.split.json')
 
             def split_call(single_image):
@@ -417,6 +430,11 @@ class Worker:
                 store.task_update(task['id'], self.name, kind)
                 try:
                     result, stats = GLMClient(config).call(instruction, payload, group, max_tokens=token_limit)
+                    if facts_request:
+                        try:
+                            content_facts(result, group)
+                        except ValueError as error:
+                            raise ProviderError(str(error), 'facts', dict(stats, error_category='facts_validation')) from None
                     break
                 except ProviderError as error:
                     store.event(doc['id'], 'model_error', dict(error.stats, run_id=run_id, stage=kind, code=error.code))
@@ -429,7 +447,7 @@ class Worker:
                                     'previous_max_tokens':token_limit,'max_tokens':increased})
                         token_limit = increased
                         continue
-                    splittable = error.code in {'length','json','context'} or image_400 or (
+                    splittable = error.code in {'length','json','context','facts'} or image_400 or (
                         error.code=='http' and error.stats.get('http_status')==400 and category in {'context','output_limit'})
                     if kind!='topic_plan' and len(group)>1 and splittable:
                         single_image = bool(image_400 and images>1)
@@ -446,9 +464,9 @@ class Worker:
                         store.event(doc['id'],'image_request_retry',{'run_id':run_id,'stage':kind,'images':images})
                         time.sleep(0.25)
                         continue
-                    if error.code=='json' and format_retries<1:
+                    if error.code in {'json','facts'} and format_retries<1:
                         format_retries += 1
-                        store.event(doc['id'],'json_request_retry',{'run_id':run_id,'stage':kind})
+                        store.event(doc['id'],error.code+'_request_retry',{'run_id':run_id,'stage':kind})
                         continue
                     raise
             temp = file.with_suffix('.tmp')
