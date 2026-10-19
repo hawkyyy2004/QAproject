@@ -202,9 +202,7 @@ def create_app(runtime=None, seed=False, workers=True):
         return {'queued':True}
 
     @app.get('/api/export')
-    def export(mode='live',topic_id=None,document_id=None,language=None):
-        if language not in (None,'zh','en'):
-            raise HTTPException(400,'导出语言仅支持 zh 或 en；不传则导出全部。')
+    def export(mode='live',topic_id=None,document_id=None):
         store=workspace(mode)
         with store.connect() as db:
             query='''SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id
@@ -212,12 +210,11 @@ def create_app(runtime=None, seed=False, workers=True):
             args=[]
             if topic_id: query+=' AND COALESCE(m.topic_id,c.topic_id)=?';args.append(topic_id)
             if document_id: query+=' AND c.document_id=?';args.append(document_id)
-            if language: query+=" AND json_extract(q.row_json,'$.language')=?";args.append(language)
             rows=[json.loads(r[0]) for r in db.execute(query+' ORDER BY q.created',args)]
         content=io.StringIO(newline='')
         writer=csv.DictWriter(content,fieldnames=FIELDS)
         writer.writeheader();writer.writerows(rows)
-        name=('demo-QA' if mode=='demo' else 'QA')+('-'+language if language else '')+'.csv'
+        name=('demo-QA' if mode=='demo' else 'QA')+'.csv'
         return Response(content.getvalue().encode('utf-8-sig'),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="{name}"'})
 
     app.mount('/',StaticFiles(directory=ROOT/'web',html=True),name='web')

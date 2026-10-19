@@ -78,12 +78,11 @@ def test_five_knowledge_points_are_ten_rows_with_same_number_of_calls(setup_pipe
     client=TestClient(app)
     all_rows=list(csv.DictReader(io.StringIO(client.get('/api/export').content.decode('utf-8-sig'))))
     assert len(all_rows)==10 and list(all_rows[0])==FIELDS
-    for language in ('zh','en'):
+    for language in ('zh','en','zh-en'):
         response=client.get('/api/export',params={'language':language,'document_id':doc_id,'topic_id':doc['topics'][0]['id']})
         rows=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
-        assert len(rows)==5 and {r['language'] for r in rows}=={language}
-        assert 'QA-'+language+'.csv' in response.headers['content-disposition']
-    assert client.get('/api/export?language=zh-en').status_code==400
+        assert len(rows)==10 and {r['language'] for r in rows}=={'zh','en'}
+        assert 'QA.csv' in response.headers['content-disposition']
     summary=client.get('/api/documents?summary_only=true').json()[0]
     assert summary['qa_count']==10 and summary['qa_pair_count']==5 and summary['bilingual_count']==5
 

@@ -8,7 +8,7 @@ import pytest
 from qaproject.glm import GLMClient, ProviderError
 from qaproject.pipeline import Worker, CHECKS, BILINGUAL_CHECKS
 from qaproject.settings import settings
-from qaproject.store import Store, digest, encode
+from qaproject.store import Store, digest, encode, classification_catalog
 
 
 def setup_document(tmp_path, images=0, count=2):
@@ -159,7 +159,7 @@ def test_legacy_complete_analysis_cache_survives_budget_change(tmp_path,monkeypa
     from qaproject.glm import ANALYZE
     from qaproject.pipeline import compact_units
     request={'kind':'analysis','prompt':ANALYZE,'payload':{'analysis_phase':'document','legacy_topics':[],'units':compact_units(units),
-             'existing_topics':[{k:t[k] for k in ('name','definition','aliases')} for t in store.topics()]},
+             'existing_topics':classification_catalog(store.topics())},
              'units':units,'config':{k:cfg.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')},
              'max_tokens':2048,'review_attempt':None}
     (store.root/'runs'/(digest(request)+'.json')).write_text(encode({'result':analysis(units),'stats':{}}))

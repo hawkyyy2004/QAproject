@@ -10,7 +10,7 @@ import pytest
 from qaproject.app import create_app
 from qaproject.pipeline import Worker, approve, validate_row, reject, quality_flags
 from qaproject.settings import FIELDS, source_ref
-from qaproject.store import Store, encode, digest, normalized, uid
+from qaproject.store import Store, encode, digest, normalized, uid, CORE_TOPICS
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def test_workspace_isolation_and_small_term_search(app):
     narrow=client.get('/api/search',params={'mode':'demo','q':'圆锥曲线'}).json()
     assert len(narrow)==1 and len(narrow[0]['documents'])==1
     assert '椭圆' in narrow[0]['documents'][0]['name']
-    assert len(app.state.stores['demo'].topics())==5  # fine terms did not create topics
+    assert len(app.state.stores['demo'].topics())==len(CORE_TOPICS)  # fine terms did not create topics
 
 
 def test_default_application_has_no_synthetic_records(tmp_path):
@@ -125,7 +125,7 @@ def test_unknown_topic_cannot_be_created_without_scope(tmp_path):
     store=Store(tmp_path/'data')
     with pytest.raises(ValueError):store.topic('三角函数')
     assert store.topic('数学研究')['name']=='数学'
-    assert len(store.topics())==5
+    assert len(store.topics())==len(CORE_TOPICS)
 
 
 def test_stale_worker_cannot_write_task(tmp_path):

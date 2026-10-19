@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REPAIR
 from .parsers import extract, text_alternatives, model_text, text_view_matches
 from .settings import FIELDS, settings, source_ref
-from .store import Store, uid, digest, encode, normalized
+from .store import Store, uid, digest, encode, normalized, classification_catalog
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection
 from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
@@ -705,7 +705,7 @@ class Worker:
             generation_groups = text_groups + visual_groups
             stage('analyzing', '读取全文并生成整篇概括主题')
             catalog = store.topics()
-            known_topics = [{k:t[k] for k in ('name','definition','aliases')} for t in catalog]
+            known_topics = classification_catalog(catalog)
             legacy = store.legacy_topic_context(doc['id'])
             initial_generation = None
             concurrency = max(1, min(2, int(config.get('analysis_concurrency', 1))))

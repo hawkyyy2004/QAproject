@@ -15,7 +15,30 @@ CORE_TOPICS = [
     ('海洋能源', '海上风电、潮汐能等海洋相关能源及评价。', ['海洋能源开发']),
     ('海洋经济', '海洋产业、经济指标、价值评价和政策。', ['海洋经济研究']),
     ('海洋观测', '海洋观测、遥感、监测和数据分析方法。', ['海洋监测']),
+    ('物理海洋', '海流、海浪、潮汐、海冰及海洋动力和热盐过程。', ['物理海洋学']),
+    ('海洋化学', '海水成分、同位素及海洋化学过程。', ['海洋化学研究']),
+    ('海洋地质', '海底地貌、沉积、地质构造与演化。', ['海洋地质学']),
+    ('海洋探索', '面向未知海域或深海环境的调查与探索。', []),
+    ('海洋气象', '海上天气、台风及海气相互作用。', []),
+    ('海洋工程', '海洋设施、结构与工程技术。', []),
 ]
+
+# Reviewed parent relationships, not synonyms. Never infer these from substring
+# matches or embedding similarity. Unlisted unique topics remain independent.
+TOPIC_PARENTS = {
+    **dict.fromkeys(('物理海洋学', '南海环流', '海洋环流', '太平洋年代际振荡',
+                     '北极海冰数值预报', '海冰同化', '海冰预报', '海冰数值预报与资料同化',
+                     '海冰预报与资料同化'), '物理海洋'),
+    **dict.fromkeys(('同位素海洋学', '同位素海洋化学'), '海洋化学'),
+    '台风极值风速预测': '海洋气象',
+}
+
+
+def classification_catalog(topics):
+    """Compact shared names and scopes; known fine directions are not new classes."""
+    names = {t['name'] for t in topics}
+    return {t['name']:t['definition'] for t in topics
+            if TOPIC_PARENTS.get(t['name']) not in names}
 
 
 def uid():
@@ -132,6 +155,7 @@ class Store:
                 for row in db.execute('SELECT DISTINCT document_id FROM document_topics').fetchall():
                     self._limit_document_terms(db, row[0])
                 db.execute('INSERT INTO schema_migrations VALUES(?,?)', (migration,time.time()))
+            self._reuse_shared_topics(db)
             # Leased tasks recover only after expiry, including across restarts.
             db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
             db.execute("""UPDATE documents SET status='queued',progress='等待恢复未完成的处理'
@@ -167,6 +191,53 @@ class Store:
     def event(self, doc_id, kind, detail):
         with self.connect() as db:
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(), doc_id, kind, encode(detail), time.time()))
+
+    def _reuse_shared_topics(self, db):
+        """Lift known legacy directions locally; preserve evidence and source snapshots."""
+        catalog = {r['name']: dict(r) for r in db.execute('SELECT * FROM topics')}
+        names_by_id = {t['id']: name for name,t in catalog.items()}
+        parents = {catalog[name]['id']: catalog[parent]['id'] for name, parent in TOPIC_PARENTS.items()
+                   if name in catalog and parent in catalog}
+        if not parents:
+            return
+        marks = ','.join('?' for _ in parents)
+        affected = db.execute(f'''SELECT DISTINCT document_id FROM document_topics
+            WHERE topic_id IN ({marks}) AND document_id NOT IN
+            (SELECT document_id FROM tasks WHERE status='running' AND lease_until>?)''',
+            (*parents, time.time())).fetchall()
+        for row in affected:
+            doc_id = row[0]
+            previous = [dict(r) for r in db.execute('SELECT * FROM document_topics WHERE document_id=?', (doc_id,))]
+            previous_maps = [dict(r) for r in db.execute('SELECT * FROM document_topic_redirects WHERE document_id=?', (doc_id,))]
+            merged = {}
+            for old in previous:
+                target = parents.get(old['topic_id'], old['topic_id'])
+                item = merged.setdefault(target, dict(keywords=[], unit_ids=set()))
+                item['keywords'].extend(json.loads(old['keywords']))
+                item['unit_ids'].update(json.loads(old['unit_ids']))
+                if target != old['topic_id']:
+                    # Keep a fine direction searchable only on its own old support.
+                    old_name = names_by_id[old['topic_id']]
+                    db.execute('''INSERT INTO document_search_terms VALUES(?,?,?,?)
+                        ON CONFLICT(document_id,term) DO NOTHING''',
+                        (doc_id, old_name, target, old['unit_ids']))
+                    db.execute('UPDATE document_search_terms SET topic_id=? WHERE document_id=? AND topic_id=?',
+                               (target,doc_id,old['topic_id']))
+                    support = {r[0] for r in db.execute('SELECT unit_id FROM candidates WHERE document_id=? AND topic_id=?',
+                                                       (doc_id,old['topic_id']))}
+                    item['unit_ids'].update(support)
+                    db.execute('INSERT OR REPLACE INTO document_topic_redirects VALUES(?,?,?,?,?)',
+                               (doc_id,old['topic_id'],target,encode(sorted(support)),time.time()))
+                    db.execute('UPDATE document_topic_redirects SET topic_id=? WHERE document_id=? AND topic_id=?',
+                               (target,doc_id,old['topic_id']))
+            db.execute('DELETE FROM document_topics WHERE document_id=?', (doc_id,))
+            db.executemany('INSERT INTO document_topics VALUES(?,?,?,?)',
+                [(doc_id,topic_id,encode(list(dict.fromkeys(t['keywords']))),encode(sorted(t['unit_ids'])))
+                 for topic_id,t in merged.items()])
+            self._limit_document_terms(db,doc_id)
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc_id,'shared_topics_reused',
+                encode({'previous':previous,'previous_mappings':previous_maps,
+                        'selected_ids':list(merged),'policy':'shared_domains_v1'}),time.time()))
 
     def topics(self):
         with self.connect() as db:
