@@ -111,7 +111,7 @@ def text_alternatives(units):
             if len(text)>LONG_TEXT_THRESHOLD:
                 seg = unit['seg']+index
                 alternative.update(id=unit['id']+f':text:{index}', text=text[start:end], seg=seg,
-                                   locator=f'page-{unit["page"]:04d}-seg-{seg:04d}', text_span=[start,end])
+                                   locator=f'page-{unit["page"]:02d}-seg-{seg:02d}', text_span=[start,end])
             alternative.pop('hash', None)
             alternative['hash'] = digest(alternative)
             result.append(alternative)
@@ -132,17 +132,17 @@ def extract(store, doc, config, progress=None):
         offset = seg_offsets.get(page, 0)
         for index, (start,end) in enumerate(spans):
             actual_seg = seg+offset+index
-            actual_locator = locator or f'page-{page:04d}-seg-{actual_seg:04d}'
+            actual_locator = locator or f'page-{page:02d}-seg-{actual_seg:02d}'
             if locator and locator.startswith('seg-'):
-                actual_locator = f'seg-{actual_seg:04d}'
+                actual_locator = f'seg-{actual_seg:02d}'
             elif locator and len(spans)>1:
-                actual_locator += f'-seg-{index+1:04d}'
+                actual_locator += f'-seg-{index+1:02d}'
             part = text[start:end]
             unit = {'id': f'{doc["id"]}:p{page}:s{actual_seg}', 'text': part, 'page': page, 'seg': actual_seg,
                     'locator': actual_locator, 'image': image, 'asset_id': asset_id,
                     'language': 'zh' if re.search('[\u4e00-\u9fff]', part) else 'en', **metadata}
             if len(spans)>1:
-                unit.update(text_span=[start,end], source_block=locator or f'page-{page:04d}-seg-{seg:04d}')
+                unit.update(text_span=[start,end], source_block=locator or f'page-{page:02d}-seg-{seg:02d}')
             unit['hash'] = digest(unit)
             units.append(unit)
         seg_offsets[page] = offset+len(spans)-1
@@ -192,7 +192,7 @@ def extract(store, doc, config, progress=None):
         text = path.read_text(encoding='utf-8-sig')
         for s, paragraph in enumerate(re.split(r'\n\s*\n', text), 1):
             if paragraph.strip():
-                add(paragraph.strip(), 0, s, locator=f'seg-{s:04d}')
+                add(paragraph.strip(), 0, s, locator=f'seg-{s:02d}')
         pages = 0
     elif suffix == '.csv':
         rows = list(csv.reader(io.StringIO(path.read_text(encoding='utf-8-sig'))))

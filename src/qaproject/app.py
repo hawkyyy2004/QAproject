@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .demo import seed_demo
-from .pipeline import Worker, approve, reject
+from .pipeline import Worker, approve, approve_document, reject
 from .settings import ROOT, FIELDS, settings, api_key, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
 from .store import Store, uid
 from .semantic import SemanticSearch, SearchCoordinator
@@ -146,6 +146,11 @@ def create_app(runtime=None, seed=False, workers=True):
     def commit(candidate_id,body:CommitBody,mode='live'):
         if mode=='demo': raise HTTPException(400,'演示记录不执行正式提交')
         return approve(workspace(mode),candidate_id,body.reviewed,body.expected_hash)
+
+    @app.post('/api/documents/{doc_id}/approve_all')
+    def commit_all(doc_id,mode='live'):
+        if mode=='demo': raise HTTPException(400,'演示记录不执行正式提交')
+        return approve_document(workspace(mode),doc_id)
 
     @app.post('/api/candidates/{candidate_id}/reject')
     def reject_candidate(candidate_id,body:CommitBody,mode='live'):

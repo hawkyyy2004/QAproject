@@ -66,7 +66,7 @@ def test_dense_pdf_keeps_all_text_real_locators_and_no_text_screenshot(tmp_path,
     assert pages==1 and len(units)>1
     assert ''.join(u['text'] for u in units)==original
     assert all(not u['image'] and len(u['text'])<=TEXT_CHUNK_SIZE for u in units)
-    assert [u['locator'] for u in units]==[f'page-0001-seg-{n:04d}' for n in range(1,len(units)+1)]
+    assert [u['locator'] for u in units]==[f'page-01-seg-{n:02d}' for n in range(1,len(units)+1)]
     assert all(original[slice(*u['text_span'])]==u['text'] for u in units)
     assert not list(store.root.rglob('*.png')) and not list(store.root.rglob('*.txt'))
     assert_hashes(units)
@@ -106,7 +106,7 @@ def test_long_graphic_page_has_one_full_image_and_bounded_text_views(tmp_path):
     assert len(views)>1 and parent['text']==original
     assert ''.join(u['text'] for u in views)==original
     assert all(text_view_matches(u,parent) and len(u['text'])<=TEXT_CHUNK_SIZE for u in views)
-    assert [u['locator'] for u in views]==[f'page-0001-seg-{n:04d}' for n in range(2,len(views)+2)]
+    assert [u['locator'] for u in views]==[f'page-01-seg-{n:02d}' for n in range(2,len(views)+2)]
     assert len(store.document(doc_id)['assets'])==1
     pix=pymupdf.Pixmap(parent['image'])
     assert pix.samples==expected.samples and (pix.width,pix.height)==(expected.width,expected.height)

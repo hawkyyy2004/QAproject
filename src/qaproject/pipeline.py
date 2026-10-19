@@ -200,6 +200,29 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
     return {'approved': True}
 
 
+def approve_document(store, doc_id):
+    """Commit every reviewable candidate of one document in one call."""
+    with store.connect() as db:
+        doc = db.execute('SELECT status FROM documents WHERE id=?', (doc_id,)).fetchone()
+        if not doc:
+            raise ValueError('记录不存在。')
+        if doc['status'] != 'waiting_review':
+            raise ValueError('仅"待核对入库"状态的文件可一键入库。')
+        pending = db.execute(
+            "SELECT id,row_hash FROM candidates WHERE document_id=? AND status NOT IN ('approved','rejected','discarded')",
+            (doc_id,)).fetchall()
+    if not pending:
+        raise ValueError('该文件没有待入库的候选。')
+    result = {'approved': 0, 'failed': []}
+    for row in pending:
+        try:
+            approve(store, row['id'], True, row['row_hash'])
+            result['approved'] += 1
+        except ValueError as error:
+            result['failed'].append({'candidate_id': row['id'], 'error': str(error)})
+    return result
+
+
 def batches(units, limit=12000, max_units=32, max_images=2):
     group, chars, images = [], 0, 0
     for unit in units:

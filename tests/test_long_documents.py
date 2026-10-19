@@ -29,7 +29,7 @@ def test_long_pdf_keeps_last_page_and_visual_evidence(tmp_path):
                            progress=lambda done,total: progress.append((done,total)))
     assert pages == 120
     last_visual = next(u for u in units if u['page']==120 and u['image'])
-    assert last_visual['locator'] == 'page-0120-seg-0001'
+    assert last_visual['locator'] == 'page-120-seg-01'
     assert 'Observation 120' in last_visual['text']
     assert len([u for u in units if u['image']]) == 2
     assert Path(last_visual['image']).is_file()

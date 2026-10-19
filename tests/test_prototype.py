@@ -49,7 +49,7 @@ def test_export_is_exact_six_fields_and_saved_images(app):
     for row in rows:
         assert list(row)==FIELDS
         assert len(row['source'].split('|'))==3
-        assert 'page-0001-seg-0001' in row['source']
+        assert 'page-01-seg-01' in row['source']
         assert Path(row['image']).is_file()
     d=client.get('/api/documents?mode=demo').json()[0]
     image=client.get('/api/assets/'+d['assets'][0]['id']+'?mode=demo')
@@ -141,7 +141,7 @@ def test_stale_worker_cannot_write_task(tmp_path):
 def test_illegal_source_rejected(app):
     d=app.state.stores['demo'].documents()[0]
     c=d['candidates'][0]
-    bad=dict(c['row'],source='/other.pdf|page-0001-seg-0001|数学')
+    bad=dict(c['row'],source='/other.pdf|page-01-seg-01|数学')
     with pytest.raises(ValueError,match='来源'):
         validate_row(bad,d['units'][0],d['topics'][0],d['path'])
 

@@ -74,7 +74,7 @@ def test_graphic_keeps_complete_page_and_true_locator(tmp_path, rotation):
     assert pix.samples == expected.samples  # includes the header, chart, caption and footer
     assert b'\x33\x99\xcc' in pix.samples  # actual plot fill survives rotation
     text = next(u for u in units if u.get('companion_of') == visual['id'])
-    assert text['image'] == '' and text['locator'] == visual['locator'] == 'page-0001-seg-0001'
+    assert text['image'] == '' and text['locator'] == visual['locator'] == 'page-01-seg-01'
     assert 'Unrelated page heading' in text['text'] and 'degrees C' in text['text']
 
 
@@ -173,7 +173,7 @@ def test_pdf_text_reaches_bilingual_generation_review_and_commit_without_images(
     assert doc['status'] == 'waiting_review', doc['error']
     assert len(doc['candidates']) == 2 and not doc['assets']
     for c in doc['candidates']:
-        assert c['row']['image'] == '' and 'page-0001-seg-0001' in c['row']['source']
+        assert c['row']['image'] == '' and 'page-01-seg-01' in c['row']['source']
         approve(store, c['id'], True, c['row_hash'])
     assert store.document(doc_id)['qa_count'] == 2
     assert not list((store.root/'assets/images').rglob('*.png'))
