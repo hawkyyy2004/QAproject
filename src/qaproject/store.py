@@ -317,6 +317,8 @@ class Store:
                 rows = db.execute('''SELECT d.id,d.name,d.status,substr(d.summary,1,500) AS summary,
                     d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id AND c.status!='discarded') AS candidate_count,
+                    (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id
+                        AND c.status NOT IN ('approved','rejected','discarded')) AS pending_commit_count,
                     (SELECT COUNT(*) FROM candidates c JOIN qas q ON q.id=c.id
                         WHERE c.document_id=d.id) AS qa_count
                     FROM documents d ORDER BY d.created DESC''').fetchall()

@@ -1,4 +1,5 @@
 import hashlib
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import re
@@ -119,7 +120,7 @@ def assert_lease(db, task_id, worker):
         raise ValueError('任务租约已失效')
 
 
-def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, verification_cache=None):
+def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, verification_cache=None, _connection=None):
     if not reviewed:
         raise ValueError('请先对照证据确认质量，再提交。')
     def file_matches(path, expected):
@@ -133,8 +134,9 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
         if valid and dry_run and verification_cache is not None:
             verification_cache.add(key)
         return valid
-    with store.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
+    with (store.connect() if _connection is None else nullcontext(_connection)) as db:
+        if _connection is None:
+            db.execute('BEGIN IMMEDIATE')
         c = db.execute('SELECT * FROM candidates WHERE id=?', (candidate_id,)).fetchone()
         if not c or c['row_hash'] != expected_hash:
             raise ValueError('候选版本已变更，请刷新后核对。')
@@ -174,6 +176,8 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
             if len(siblings)!=2 or {x['row']['language'] for x in siblings}!={'zh','en'}:
                 raise ValueError('双语配对不完整，禁止提交。')
             for sibling in siblings:
+                if sibling['status'] in ('rejected','discarded'):
+                    raise ValueError('双语组中存在已排除的版本，不能提交不完整配对。')
                 if sibling['pair_language']!=sibling['row']['language']:
                     raise ValueError('双语配对的语言标签不一致。')
                 if sibling['document_id']!=d['id'] or sibling['unit_id']!=c['unit_id'] or sibling['topic_id']!=c['topic_id'] or sibling['evidence_hash']!=unit['hash']:
@@ -200,27 +204,27 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
     return {'approved': True}
 
 
-def approve_document(store, doc_id):
-    """Commit every reviewable candidate of one document in one call."""
+def approve_document(store, document_id):
+    """Commit a file through the existing gates, atomically and without model calls."""
     with store.connect() as db:
-        doc = db.execute('SELECT status FROM documents WHERE id=?', (doc_id,)).fetchone()
+        db.execute('BEGIN IMMEDIATE')
+        doc = db.execute('SELECT status FROM documents WHERE id=?',(document_id,)).fetchone()
         if not doc:
-            raise ValueError('记录不存在。')
-        if doc['status'] != 'waiting_review':
-            raise ValueError('仅"待核对入库"状态的文件可一键入库。')
-        pending = db.execute(
-            "SELECT id,row_hash FROM candidates WHERE document_id=? AND status NOT IN ('approved','rejected','discarded')",
-            (doc_id,)).fetchall()
-    if not pending:
-        raise ValueError('该文件没有待入库的候选。')
-    result = {'approved': 0, 'failed': []}
-    for row in pending:
-        try:
-            approve(store, row['id'], True, row['row_hash'])
-            result['approved'] += 1
-        except ValueError as error:
-            result['failed'].append({'candidate_id': row['id'], 'error': str(error)})
-    return result
+            raise ValueError('找不到文件。')
+        if doc['status'] not in ('waiting_review','insufficient','completed_under_min','completed'):
+            raise ValueError('请先等待文件处理及审核完成；失败文件请先重试。')
+        if db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(document_id,)).fetchone():
+            raise ValueError('该文件正在处理，请等待当前任务完成。')
+        candidates = db.execute("""SELECT id,row_hash FROM candidates WHERE document_id=?
+            AND status NOT IN ('approved','rejected','discarded') ORDER BY created,id""",(document_id,)).fetchall()
+        for candidate in candidates:
+            approve(store,candidate['id'],True,candidate['row_hash'],_connection=db)
+        if candidates:
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',
+                       (uid(),document_id,'document_review_commit',encode({'records':len(candidates)}),time.time()))
+        return {'approved':True, 'committed_count':len(candidates),
+                'qa_count':db.execute('SELECT COUNT(*) FROM qas q JOIN candidates c ON c.id=q.id WHERE c.document_id=?',
+                                      (document_id,)).fetchone()[0]}
 
 
 def batches(units, limit=12000, max_units=32, max_images=2):

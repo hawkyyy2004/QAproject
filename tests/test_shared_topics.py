@@ -115,7 +115,8 @@ def test_guidance_prioritizes_paper_keywords_and_permits_distinctive_topics():
     assert '原文“关键词/Keywords”' in FACTS
     assert '至少包含一个' in ANALYZE and '允许同时有独有主题' in ANALYZE
     assert '可用原文核心关键词作主题' in ANALYZE
-    assert '不要所有论文都归海洋观测' in ANALYZE
+    assert '每个主题只表达一个独立分类概念' in ANALYZE
+    assert '分类清单开放' in ANALYZE
     assert {'物理海洋','海洋生态','海洋探索'} <= {t[0] for t in CORE_TOPICS}
 
 

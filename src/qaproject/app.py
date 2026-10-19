@@ -147,10 +147,15 @@ def create_app(runtime=None, seed=False, workers=True):
         if mode=='demo': raise HTTPException(400,'演示记录不执行正式提交')
         return approve(workspace(mode),candidate_id,body.reviewed,body.expected_hash)
 
+    @app.post('/api/documents/{doc_id}/approve')
+    def commit_document(doc_id,mode='live'):
+        if mode!='live': raise HTTPException(400,'演示记录不执行正式提交')
+        return approve_document(workspace(mode),doc_id)
+
     @app.post('/api/documents/{doc_id}/approve_all')
     def commit_all(doc_id,mode='live'):
-        if mode=='demo': raise HTTPException(400,'演示记录不执行正式提交')
-        return approve_document(workspace(mode),doc_id)
+        result = commit_document(doc_id,mode)
+        return {'approved':result['committed_count'], 'failed':[]}
 
     @app.post('/api/candidates/{candidate_id}/reject')
     def reject_candidate(candidate_id,body:CommitBody,mode='live'):
