@@ -114,9 +114,12 @@ def test_failed_translation_or_fact_review_blocks_both_versions(setup_pipeline,f
         return result
     behavior['review']=invalid_review
     doc=run(setup_pipeline)
-    assert all(c['status']=='needs_review' for c in doc['candidates'])
-    for c in doc['candidates'][:2]:
-        with pytest.raises(ValueError,match='审核'):approve(store,c['id'],True,c['row_hash'])
+    assert not doc['candidates'] and doc['discarded_pair_count']>0 and doc['status']=='insufficient'
+    with store.connect() as db:
+        drafts=[dict(r) for r in db.execute("SELECT * FROM candidates WHERE status='discarded'")]
+    assert drafts and all(json.loads(c['review'])[flag] is False for c in drafts)
+    for c in drafts[:2]:
+        with pytest.raises(ValueError):approve(store,c['id'],True,c['row_hash'])
     assert store.document(doc['id'])['qa_count']==0
 
 
@@ -271,13 +274,12 @@ def test_expired_worker_cannot_store_generated_pair_or_overwrite_new_status(setu
 def test_explicit_rereview_gets_fresh_decision_and_keeps_previous_review(setup_pipeline):
     app,store,doc_id,worker,calls,behavior,cfg=setup_pipeline
     cfg['target_per_document']=cfg['min_per_document']=1
-    def fail_translation(result,*args):
-        result['checks'][0]['translation_consistent']=False
-        return result
-    behavior['review']=fail_translation
     doc=run(setup_pipeline)
-    assert doc['candidates'][0]['status']=='needs_review'
-    behavior.clear()
+    # An older task may have left an unsuccessful review before automatic repair existed.
+    with store.connect() as db:
+        for c in doc['candidates']:
+            previous=dict(c['review'],translation_consistent=False)
+            db.execute("UPDATE candidates SET status='needs_review',review=? WHERE id=?",(encode(previous),c['id']))
     client=TestClient(app)
     headers={'X-QA-Session':client.get('/api/bootstrap').json()['session']}
     target=doc['candidates'][0]

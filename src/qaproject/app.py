@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .demo import seed_demo
 from .pipeline import Worker, approve, reject
-from .settings import ROOT, FIELDS, settings, api_key
+from .settings import ROOT, FIELDS, settings, api_key, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
 from .store import Store, uid
 from .semantic import SemanticSearch, SearchCoordinator
 
@@ -76,7 +76,9 @@ def create_app(runtime=None, seed=False, workers=True):
         cfg=settings()
         return {'session':session,'key_configured':bool(api_key()),'base_url':cfg['base_url'],
                 'text_model':cfg['text_model'],'vision_model':cfg.get('vision_model'),
-                'limits':{'max_file_mb':cfg['max_file_mb'],'max_pages':cfg['max_pages']}}
+                'limits':{'max_file_mb':cfg['max_file_mb'],'max_pages':cfg['max_pages'],
+                          'min_topics_per_document':MIN_DOCUMENT_TOPICS,'max_topics_per_document':MAX_DOCUMENT_TOPICS,
+                          'max_search_terms_per_document':MAX_DOCUMENT_SEARCH_TERMS}}
 
     @app.get('/api/documents')
     def documents(mode='live', summary_only:bool=False):
@@ -180,6 +182,23 @@ def create_app(runtime=None, seed=False, workers=True):
         with store.connect() as db:
             db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0 WHERE document_id=? AND status='failed'",(doc_id,))
         store.update_document(doc_id,status='queued',error='')
+        return {'queued':True}
+
+    @app.post('/api/documents/{doc_id}/optimize')
+    def optimize(doc_id,mode='live'):
+        if mode!='live': raise HTTPException(400,'测试样例不执行正式优化')
+        store=workspace(mode)
+        with store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            document=db.execute('SELECT status FROM documents WHERE id=?',(doc_id,)).fetchone()
+            if not document: raise ValueError('找不到文件')
+            if document['status'] not in ('waiting_review','insufficient','completed_under_min'):
+                raise ValueError('请先等待当前任务完成；失败文件请使用重试恢复。')
+            if db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(doc_id,)).fetchone():
+                raise ValueError('该文件正在处理，请等待当前任务完成。')
+            db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',(uid(),doc_id,'queued','quality_queued'))
+            db.execute("UPDATE documents SET status='queued',progress='等待修订未通过的问答并重新审核' WHERE id=?",(doc_id,))
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'optimization_requested','{}',time.time()))
         return {'queued':True}
 
     @app.get('/api/export')

@@ -69,6 +69,9 @@ def matching_topic_ids(store, topics, query):
         for row in db.execute('SELECT topic_id,keywords FROM document_topics'):
             if any(query in normalized(x) for x in json.loads(row['keywords'])):
                 matched.add(row['topic_id'])
+        for row in db.execute('SELECT topic_id,term FROM document_search_terms'):
+            if query in normalized(row['term']):
+                matched.add(row['topic_id'])
     return matched
 
 

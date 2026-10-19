@@ -8,6 +8,48 @@ import pymupdf
 from .store import digest
 
 
+def pdf_paragraphs(text):
+    return [x.strip() for x in re.split(r'\n\s*\n', text) if x.strip()]
+
+
+def has_full_page_image(page):
+    """Recognize the common single direct scan without decoding it for metadata."""
+    images = page.get_images(full=True)
+    if len(images) != 1 or images[0][-1] != 0 or min(images[0][2:4]) <= 1:
+        return False
+    # Direct-resource bbox lookup uses the PDF display commands, not image hashes.
+    bounds = page.rect * page.derotation_matrix
+    rect = page.get_image_bbox(images[0]) & bounds
+    if rect.width >= bounds.width*.95 and rect.height >= bounds.height*.95:
+        return True
+    return False
+
+
+def has_graphics(page, textpage):
+    """Detect displayed graphics; render their complete page without cropping."""
+    bounds = page.rect * page.derotation_matrix
+    # Same metadata path as Page.get_image_info(), reusing our already parsed TextPage.
+    # Avoid a second page interpretation and Python image-byte/digest/xref extraction.
+    for info in textpage.extractIMGINFO(hashes=False):
+        rect = pymupdf.Rect(info['bbox']) & bounds
+        if not rect.is_empty and info['width'] > 1 and info['height'] > 1:
+            return True
+    for drawing in page.get_cdrawings():
+        rect = pymupdf.Rect(drawing['rect'])
+        # Page backgrounds, borders and thin horizontal text rules are not figures.
+        if rect.width >= bounds.width*.95 and rect.height >= bounds.height*.95 and len(drawing['items']) == 1:
+            if drawing.get('fill') is None or all(c >= .98 for c in drawing['fill']):
+                continue
+        if rect.height <= 1 and rect.width > 20:
+            continue
+        if rect.width <= 1 and rect.height <= 1:
+            continue
+        rect = (rect + (-2, -2, 2, 2)) & bounds
+        if not rect.is_empty:
+            return True
+    return False
+
+
 def text_alternatives(units):
     """Keep frozen visual evidence and add a text view at the same true locator."""
     result = list(units)
@@ -33,11 +75,11 @@ def extract(store, doc, config, progress=None):
     folder.mkdir(parents=True, exist_ok=True)
     units = []
 
-    def add(text, page, seg, image='', asset_id='', locator=None):
+    def add(text, page, seg, image='', asset_id='', locator=None, **metadata):
         locator = locator or f'page-{page:04d}-seg-{seg:04d}'
         unit = {'id': f'{doc["id"]}:p{page}:s{seg}', 'text': text, 'page': page, 'seg': seg,
                 'locator': locator, 'image': image, 'asset_id': asset_id,
-                'language': 'zh' if re.search('[\u4e00-\u9fff]', text) else 'en'}
+                'language': 'zh' if re.search('[\u4e00-\u9fff]', text) else 'en', **metadata}
         unit['hash'] = digest(unit)
         units.append(unit)
 
@@ -52,20 +94,23 @@ def extract(store, doc, config, progress=None):
             if progress:
                 progress(0, len(pdf))
             for n, page in enumerate(pdf, 1):
-                text = page.get_text('text', sort=True).strip()
-                paragraphs = [x.strip() for x in re.split(r'\n\s*\n', text) if x.strip()]
-                visual = bool(page.get_images()) or len(page.get_drawings()) > 2 or len(text) < 60
-                image, asset = '', ''
-                if visual:
-                    out = folder / f'page-{n:04d}.png'
-                    page.get_pixmap(dpi=144, alpha=False).save(out)
-                    image = str(out)
-                    asset = store.add_asset(doc['id'], out, n, f'第 {n} 页图文证据')
-                    # Whole-page unit preserves the true relationship of chart, labels and caption.
-                    add(text or 'Scan page: use actual visual evidence.', n, 1, image, asset)
+                visual = has_full_page_image(page)
+                flags = pymupdf.TEXTFLAGS_TEXT | (0 if visual else pymupdf.TEXT_PRESERVE_IMAGES)
+                textpage = page.get_textpage(flags=flags)
+                text = page.get_text('text', sort=True, textpage=textpage).strip()
+                if visual or has_graphics(page, textpage):
+                    pixmap = page.get_pixmap(dpi=144, alpha=False)
+                    # Check the final-resolution image: downsampling could erase faint/sparse evidence.
+                    blank = not text and pixmap.is_unicolor and pixmap.pixel(0, 0) == (255, 255, 255)
+                    if not blank:
+                        out = folder / f'page-{n:04d}.png'
+                        pixmap.save(out)
+                        asset = store.add_asset(doc['id'], out, n, f'第 {n} 页完整图片')
+                        add(text or 'Scan page: use actual visual evidence.', n, 1, str(out), asset,
+                            evidence_kind='pdf_page')
                 else:
-                    for s, paragraph in enumerate(paragraphs, 1):
-                        add(paragraph, n, s)
+                    for s, paragraph in enumerate(pdf_paragraphs(text), 1):
+                        add(paragraph, n, s, evidence_kind='extracted_text')
                 if progress and (n % 10 == 0 or n == len(pdf)):
                     progress(n, len(pdf))
             pages = len(pdf)

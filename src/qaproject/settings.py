@@ -4,6 +4,9 @@ import os
 
 ROOT = Path(__file__).resolve().parents[2]
 FIELDS = ['input', 'thinking', 'output', 'source', 'image', 'language']
+MIN_DOCUMENT_TOPICS = 1
+MAX_DOCUMENT_TOPICS = 5
+MAX_DOCUMENT_SEARCH_TERMS = 10
 
 
 def settings():

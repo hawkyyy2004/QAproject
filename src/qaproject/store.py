@@ -7,6 +7,8 @@ import sqlite3
 import time
 import uuid
 
+from .settings import MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
+
 CORE_TOPICS = [
     ('数学', '数学概念、关系、方法与应用。', ['数学研究']),
     ('海洋生态', '海洋生物、生态过程及生态系统影响。', ['海洋生态学']),
@@ -32,6 +34,27 @@ def normalized(value):
     return re.sub(r'[\W_]+', '', value.casefold())
 
 
+def search_term_key(value):
+    # Symbols can distinguish concepts (C/C++, 2.5/25); never erase them to merge terms.
+    return ' '.join(value.casefold().split())
+
+
+def limit_search_terms(terms, limit=MAX_DOCUMENT_SEARCH_TERMS):
+    """Keep ranked terms, normalize spelling duplicates and retain their evidence union."""
+    result, names = {}, {}
+    for word, support in terms.items():
+        word = word.strip()
+        key = search_term_key(word)
+        if not key:
+            continue
+        if key in names:
+            result[names[key]].update(support)
+        elif limit is None or len(result) < limit:
+            names[key] = word
+            result[word] = set(support)
+    return result
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -53,6 +76,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS assets(
               id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
               path TEXT, hash TEXT, page INTEGER, label TEXT);
+            CREATE TABLE IF NOT EXISTS document_search_terms(
+              document_id TEXT REFERENCES documents(id), term TEXT,
+              topic_id TEXT REFERENCES topics(id), unit_ids TEXT,
+              PRIMARY KEY(document_id,term));
             CREATE TABLE IF NOT EXISTS candidates(
               id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
               unit_id TEXT, topic_id TEXT REFERENCES topics(id), row_json TEXT,
@@ -74,6 +101,7 @@ class Store:
               attempts INTEGER DEFAULT 0, stage TEXT DEFAULT 'queued');
             CREATE TABLE IF NOT EXISTS events(
               id TEXT PRIMARY KEY, document_id TEXT, kind TEXT, detail TEXT, created REAL);
+            CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied REAL);
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);
             CREATE INDEX IF NOT EXISTS candidate_docs ON candidates(document_id);
@@ -83,6 +111,8 @@ class Store:
                 db.execute('PRAGMA user_version=1')
             if 'review_candidate_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
                 db.execute('ALTER TABLE tasks ADD COLUMN review_candidate_id TEXT REFERENCES candidates(id)')
+            if 'repair_attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(qa_pairs)')}:
+                db.execute('ALTER TABLE qa_pairs ADD COLUMN repair_attempts INTEGER NOT NULL DEFAULT 0')
             if 'unit_count' not in {r['name'] for r in db.execute('PRAGMA table_info(documents)')}:
                 db.execute('ALTER TABLE documents ADD COLUMN unit_count INTEGER DEFAULT 0')
                 db.execute('UPDATE documents SET unit_count=json_array_length(units)')
@@ -93,11 +123,16 @@ class Store:
             for name, definition, aliases in CORE_TOPICS:
                 db.execute('INSERT OR IGNORE INTO topics VALUES(?,?,?,?)',
                            (uid(), name, definition, encode(aliases)))
+            migration = 'document_search_terms_limit_10_v1'
+            if not db.execute('SELECT 1 FROM schema_migrations WHERE name=?', (migration,)).fetchone():
+                for row in db.execute('SELECT DISTINCT document_id FROM document_topics').fetchall():
+                    self._limit_document_terms(db, row[0])
+                db.execute('INSERT INTO schema_migrations VALUES(?,?)', (migration,time.time()))
             # Leased tasks recover only after expiry, including across restarts.
             db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
             db.execute("""UPDATE documents SET status='queued',progress='等待恢复未完成的处理'
                 WHERE id IN (SELECT document_id FROM tasks WHERE status='queued')
-                AND status IN ('parsing','analyzing','generating','reviewing')""")
+                AND status IN ('parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight')""")
 
     @contextlib.contextmanager
     def connect(self):
@@ -163,9 +198,19 @@ class Store:
             item['timings'] = json.loads(item['timings'])
             item['topics'] = [dict(x, keywords=json.loads(x['keywords']), unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
                 'SELECT t.*,dt.keywords,dt.unit_ids FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE document_id=?', (doc_id,))]
+            item['search_terms'] = [dict(x, unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
+                'SELECT term,topic_id,unit_ids FROM document_search_terms WHERE document_id=?', (doc_id,))]
+            by_topic = {t['id']: t for t in item['topics']}
+            seen = {t['id']: set(t['keywords']) for t in item['topics']}
+            for term in item['search_terms']:
+                if term['topic_id'] in by_topic and term['term'] not in seen[term['topic_id']]:
+                    by_topic[term['topic_id']]['keywords'].append(term['term'])
+                    seen[term['topic_id']].add(term['term'])
             item['candidates'] = [dict(x, row=json.loads(x['row_json']), review=json.loads(x['review'])) for x in db.execute(
                 '''SELECT c.*,p.pair_id FROM candidates c LEFT JOIN candidate_pairs p ON p.candidate_id=c.id
-                   WHERE c.document_id=? ORDER BY c.created,c.rowid''', (doc_id,))]
+                   WHERE c.document_id=? AND c.status!='discarded' ORDER BY c.created,c.rowid''', (doc_id,))]
+            item['discarded_pair_count'] = db.execute('''SELECT COUNT(DISTINCT m.pair_id) FROM candidates c
+                JOIN candidate_pairs m ON m.candidate_id=c.id WHERE c.document_id=? AND c.status='discarded' ''', (doc_id,)).fetchone()[0]
             item['qa_count'] = db.execute('SELECT COUNT(*) FROM qas q JOIN candidates c ON q.id=c.id WHERE c.document_id=?', (doc_id,)).fetchone()[0]
             item.update(self.pair_counts(db, doc_id))
             item['assets'] = [dict(x) for x in db.execute('SELECT * FROM assets WHERE document_id=?', (doc_id,))]
@@ -179,7 +224,7 @@ class Store:
             with self.connect() as db:
                 rows = db.execute('''SELECT d.id,d.name,d.status,substr(d.summary,1,500) AS summary,
                     d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,
-                    (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id) AS candidate_count,
+                    (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id AND c.status!='discarded') AS candidate_count,
                     (SELECT COUNT(*) FROM candidates c JOIN qas q ON q.id=c.id
                         WHERE c.document_id=d.id) AS qa_count
                     FROM documents d ORDER BY d.created DESC''').fetchall()
@@ -188,6 +233,14 @@ class Store:
                     FROM document_topics dt JOIN topics t ON t.id=dt.topic_id'''):
                     items[r['document_id']]['topics'].append(
                         {'id':r['id'], 'name':r['name'], 'keywords':json.loads(r['keywords'])})
+                by_topic = {(doc_id, t['id']): t for doc_id, d in items.items() for t in d['topics']}
+                seen = {key: set(t['keywords']) for key, t in by_topic.items()}
+                for r in db.execute('SELECT document_id,topic_id,term FROM document_search_terms'):
+                    key = (r['document_id'], r['topic_id'])
+                    topic = by_topic.get(key)
+                    if topic is not None and r['term'] not in seen[key]:
+                        topic['keywords'].append(r['term'])
+                        seen[key].add(r['term'])
                 for item in items.values():
                     item.update(self.pair_counts(db, item['id']))
             return list(items.values())
@@ -201,7 +254,7 @@ class Store:
         counts = db.execute('''SELECT COUNT(*) AS pair_count,
             COALESCE(SUM(active=2),0) AS bilingual_count,
             COALESCE(SUM(committed=2),0) AS qa_pair_count FROM (
-              SELECT p.id,SUM(c.status!='rejected') AS active,COUNT(q.id) AS committed
+              SELECT p.id,SUM(c.status NOT IN ('rejected','discarded')) AS active,COUNT(q.id) AS committed
               FROM qa_pairs p JOIN candidate_pairs m ON m.pair_id=p.id
               JOIN candidates c ON c.id=m.candidate_id LEFT JOIN qas q ON q.id=c.id
               WHERE p.document_id=? GROUP BY p.id)''', (doc_id,)).fetchone()
@@ -222,12 +275,120 @@ class Store:
             db.execute('UPDATE documents SET '+','.join(k+'=?' for k in values)+' WHERE id=?', [*values.values(), doc_id])
 
     def link_topic(self, doc_id, topic_id, keywords, unit_ids):
+        incoming_keywords, incoming_support = list(keywords), list(unit_ids)
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             previous = db.execute('SELECT keywords,unit_ids FROM document_topics WHERE document_id=? AND topic_id=?', (doc_id, topic_id)).fetchone()
+            if not previous and db.execute('SELECT COUNT(*) FROM document_topics WHERE document_id=?', (doc_id,)).fetchone()[0] >= MAX_DOCUMENT_TOPICS:
+                raise ValueError('每篇文件最多5个正式主题，须先按全文筛选。')
             if previous:
                 keywords = list(dict.fromkeys([*json.loads(previous['keywords']), *keywords]))
                 unit_ids = list(dict.fromkeys([*json.loads(previous['unit_ids']), *unit_ids]))
             db.execute('INSERT OR REPLACE INTO document_topics VALUES(?,?,?,?)', (doc_id, topic_id, encode(keywords), encode(unit_ids)))
+            existing_terms = {search_term_key(r['term']): dict(r) for r in db.execute(
+                'SELECT term,topic_id,unit_ids FROM document_search_terms WHERE document_id=?', (doc_id,))}
+            for word in incoming_keywords:
+                key = search_term_key(word)
+                if not key:
+                    continue
+                old = existing_terms.get(key)
+                support = sorted(set(incoming_support) | set(json.loads(old['unit_ids']) if old else []))
+                record = dict(term=old['term'] if old else word.strip(), topic_id=old['topic_id'] if old else topic_id,
+                              unit_ids=encode(support))
+                db.execute('''INSERT INTO document_search_terms VALUES(?,?,?,?)
+                           ON CONFLICT(document_id,term) DO UPDATE SET unit_ids=excluded.unit_ids''',
+                           (doc_id,record['term'],record['topic_id'],record['unit_ids']))
+                existing_terms[key] = record
+            self._limit_document_terms(db, doc_id)
+
+    @staticmethod
+    def _limit_document_terms(db, doc_id):
+        """Cap both keyword stores together; never read or change evidence/QA bodies."""
+        topics = [dict(r) for r in db.execute(
+            'SELECT topic_id,keywords,unit_ids FROM document_topics WHERE document_id=? ORDER BY rowid', (doc_id,))]
+        previous = [dict(r) for r in db.execute(
+            'SELECT term,topic_id,unit_ids FROM document_search_terms WHERE document_id=? ORDER BY rowid', (doc_id,))]
+        topic_ids = {t['topic_id'] for t in topics}
+        pool, owners, explicit = {}, {}, set()
+        # Explicit term evidence has finer scope than a legacy topic's unit list.
+        for term in previous:
+            if term['topic_id'] not in topic_ids:
+                continue
+            word, key = term['term'].strip(), search_term_key(term['term'])
+            pool.setdefault(word, set()).update(json.loads(term['unit_ids']))
+            owners.setdefault(key, term['topic_id'])
+            explicit.add(key)
+        for topic in topics:
+            for word in json.loads(topic['keywords']):
+                key = search_term_key(word)
+                if key not in explicit:
+                    pool.setdefault(word, set()).update(json.loads(topic['unit_ids']))
+                    owners.setdefault(key, topic['topic_id'])
+        limited = limit_search_terms(pool)
+        rows = [dict(term=word, topic_id=owners[search_term_key(word)], unit_ids=encode(sorted(support)))
+                for word, support in limited.items()]
+        keywords = {t['topic_id']: [] for t in topics}
+        for row in rows:
+            keywords[row['topic_id']].append(row['term'])
+        changed = rows != previous or any(json.loads(t['keywords']) != keywords[t['topic_id']] for t in topics)
+        if not changed:
+            return
+        for topic in topics:
+            db.execute('UPDATE document_topics SET keywords=? WHERE document_id=? AND topic_id=?',
+                       (encode(keywords[topic['topic_id']]),doc_id,topic['topic_id']))
+        db.execute('DELETE FROM document_search_terms WHERE document_id=?', (doc_id,))
+        db.executemany('INSERT INTO document_search_terms VALUES(?,?,?,?)',
+                       [(doc_id,r['term'],r['topic_id'],r['unit_ids']) for r in rows])
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc_id,'document_search_terms_limited',
+                   encode({'previous_topics':topics,'previous_terms':previous,'retained':[r['term'] for r in rows],
+                           'max_per_document':MAX_DOCUMENT_SEARCH_TERMS}),time.time()))
+
+    def apply_topic_selection(self, doc_id, selected, terms, summary, task_id, worker):
+        """Register only selected topics and publish classification in one leased transaction."""
+        if not MIN_DOCUMENT_TOPICS <= len(selected) <= MAX_DOCUMENT_TOPICS:
+            raise ValueError('每篇文件须有1至5个正式主题。')
+        terms = limit_search_terms(terms)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute("SELECT 1 FROM tasks WHERE id=? AND document_id=? AND worker=? AND status='running' AND lease_until>?",
+                              (task_id, doc_id, worker, time.time())).fetchone():
+                raise ValueError('任务租约已失效')
+            previous = [dict(r) for r in db.execute('SELECT * FROM document_topics WHERE document_id=?', (doc_id,))]
+            catalog = {normalized(n): dict(t) for t in db.execute('SELECT * FROM topics')
+                       for n in [t['name'], *json.loads(t['aliases'])]}
+            records = []
+            for t in selected:
+                topic = catalog.get(normalized(t['name']))
+                if not topic:
+                    if not t['name'].strip() or len(t['name']) > 24 or not t['definition'].strip() or not t['new_reason'].strip():
+                        raise ValueError('新主题缺少规范名称、定义或独立分类理由。')
+                    topic = dict(id=uid(), name=t['name'])
+                    db.execute('INSERT INTO topics VALUES(?,?,?,?)',
+                               (topic['id'], t['name'], t['definition'], '[]'))
+                    catalog[normalized(t['name'])] = topic
+                records.append(dict(t, id=topic['id'], unit_ids=set(t['unit_ids'])))
+            ids = {t['id'] for t in records}
+            required = {r[0] for r in db.execute('SELECT DISTINCT topic_id FROM candidates WHERE document_id=?', (doc_id,))}
+            if not required <= ids:
+                raise ValueError('不能移除历史候选引用的主题，须先审核归类迁移。')
+            db.execute('DELETE FROM document_search_terms WHERE document_id=?', (doc_id,))
+            db.execute('DELETE FROM document_topics WHERE document_id=?', (doc_id,))
+            # Group a file's fine-term hits under its best supported selected topic,
+            # falling back to its primary topic for display, never for QA evidence.
+            term_rows = []
+            keywords = {t['id']: [] for t in records}
+            for word, support in terms.items():
+                support = set(support)
+                topic = max(records, key=lambda t: len(support & t['unit_ids']))
+                term_rows.append((doc_id,word,topic['id'],encode(sorted(support))))
+                keywords[topic['id']].append(word)
+            db.executemany('INSERT INTO document_topics VALUES(?,?,?,?)',
+                [(doc_id,t['id'],encode(keywords[t['id']]),encode(sorted(t['unit_ids']))) for t in records])
+            db.executemany('INSERT INTO document_search_terms VALUES(?,?,?,?)', term_rows)
+            db.execute("UPDATE documents SET coverage='complete',summary=? WHERE id=?", (summary,doc_id))
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc_id,'document_topics_selected',
+                encode({'previous':previous,'selected_ids':[t['id'] for t in records], 'term_count':len(terms),
+                        'max_per_document':MAX_DOCUMENT_TOPICS}),time.time()))
 
     def add_asset(self, doc_id, path, page, label):
         asset_id = uid()
@@ -240,7 +401,8 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
             row = db.execute("SELECT * FROM tasks WHERE status='queued'"+
-                             (' AND document_id=?' if document_id else '')+' ORDER BY rowid LIMIT 1',
+                             (' AND document_id=?' if document_id else '')+
+                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL THEN 1 ELSE 0 END,rowid LIMIT 1",
                              (document_id,) if document_id else ()).fetchone()
             if not row:
                 return None
