@@ -1,6 +1,7 @@
-"""Select formal topics once per document, without another model request."""
+"""Validate a directly generated whole-document topic plan; never truncate a topic list."""
 from .store import normalized, limit_search_terms, search_term_key
 from .settings import MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS
+from .parsers import text_view_matches
 
 
 class TopicSelection:
@@ -16,6 +17,11 @@ class TopicSelection:
     def add(self, result, group):
         if not isinstance(result.get('summary'), str) or not isinstance(result.get('topics'), list):
             raise ValueError('主题分析响应结构无效。')
+        if len(result['topics']) > MAX_DOCUMENT_TOPICS:
+            raise ValueError('模型未按整篇约定生成概括主题，需要系统重新生成。')
+        names = {normalized(t.get('name','')) for t in result['topics'] if isinstance(t,dict) and isinstance(t.get('name'),str)}
+        if len(set(self.proposals) | names) > MAX_DOCUMENT_TOPICS:
+            raise ValueError('不能累加分批主题；应直接生成一份整篇主题规划。')
         allowed = {u['id'] for u in group}
         for t in result['topics']:
             if not isinstance(t, dict) or not isinstance(t.get('name'), str):
@@ -53,18 +59,14 @@ class TopicSelection:
                 proposal['locations'].add(unit['locator'])
                 proposal['first'] = min(proposal['first'], self.positions[unit_id])
                 parent = self.units.get(unit.get('companion_of'))
-                if parent and parent['text'] == unit['text'] and parent['locator'] == unit['locator']:
+                if text_view_matches(unit, parent):
                     proposal['unit_ids'].add(parent['id'])
 
-    def select(self, required_ids=()):
-        required = set(required_ids)
-        if len(required) > MAX_DOCUMENT_TOPICS:
-            raise ValueError('历史候选引用超过5个主题，需另行审核归类迁移；未改动QA及审核记录。')
-        ranked = sorted(self.proposals.values(), key=lambda t: (
-            t['id'] not in required, -t['importance'], -len(t['locations']), not bool(t['id']), t['first'], t['order']))
-        selected = ranked[:MAX_DOCUMENT_TOPICS]
-        if not required <= {t['id'] for t in selected}:
-            raise ValueError('历史候选的主题缺少本次证据支持，需重新核验归类。')
+    def select(self):
+        # The model has already produced the whole-document plan. Do not rank and
+        # truncate formal topic proposals, or pin every old fine label into the plan.
+        ranked = list(self.proposals.values())
+        selected = ranked
         if len(selected) < MIN_DOCUMENT_TOPICS:
             raise ValueError('未识别到有证据支持的正式主题，归类未完成，请重试或检查原文；不以占位主题补数。')
         # Search terms retain their own support; they never expand generation permissions.

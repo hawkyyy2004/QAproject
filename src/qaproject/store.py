@@ -80,6 +80,10 @@ class Store:
               document_id TEXT REFERENCES documents(id), term TEXT,
               topic_id TEXT REFERENCES topics(id), unit_ids TEXT,
               PRIMARY KEY(document_id,term));
+            CREATE TABLE IF NOT EXISTS document_topic_redirects(
+              document_id TEXT REFERENCES documents(id), old_topic_id TEXT REFERENCES topics(id),
+              topic_id TEXT REFERENCES topics(id), unit_ids TEXT, created REAL,
+              PRIMARY KEY(document_id,old_topic_id));
             CREATE TABLE IF NOT EXISTS candidates(
               id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
               unit_id TEXT, topic_id TEXT REFERENCES topics(id), row_json TEXT,
@@ -133,6 +137,17 @@ class Store:
             db.execute("""UPDATE documents SET status='queued',progress='等待恢复未完成的处理'
                 WHERE id IN (SELECT document_id FROM tasks WHERE status='queued')
                 AND status IN ('parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight')""")
+
+            # Recover old releases' excess labels through the same worker.
+            for row in db.execute('''SELECT d.id FROM documents d JOIN document_topics dt ON dt.document_id=d.id
+                WHERE d.mode='live' GROUP BY d.id HAVING COUNT(*)>5''').fetchall():
+                if not db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(row[0],)).fetchone():
+                    task_id = uid()
+                    db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',
+                               (task_id,row[0],'queued','topic_reclassification'))
+                    db.execute("UPDATE documents SET status='queued',progress='系统自动概括整篇正式主题，无需手动筛选' WHERE id=?",(row[0],))
+                    db.execute('INSERT INTO events VALUES(?,?,?,?,?)',
+                               (uid(),row[0],'topic_reclassification_queued',encode({'task_id':task_id}),time.time()))
 
     @contextlib.contextmanager
     def connect(self):
@@ -211,6 +226,12 @@ class Store:
                    WHERE c.document_id=? AND c.status!='discarded' ORDER BY c.created,c.rowid''', (doc_id,))]
             item['discarded_pair_count'] = db.execute('''SELECT COUNT(DISTINCT m.pair_id) FROM candidates c
                 JOIN candidate_pairs m ON m.candidate_id=c.id WHERE c.document_id=? AND c.status='discarded' ''', (doc_id,)).fetchone()[0]
+            item['historical_topics'] = [dict(r,unit_ids=json.loads(r['unit_ids'])) for r in db.execute(
+                '''SELECT t.*,m.topic_id AS canonical_topic_id,m.unit_ids FROM document_topic_redirects m
+                   JOIN topics t ON t.id=m.old_topic_id WHERE m.document_id=?''',(doc_id,))]
+            redirects = {t['id']:t['canonical_topic_id'] for t in item['historical_topics']}
+            for candidate in item['candidates']:
+                candidate['canonical_topic_id'] = redirects.get(candidate['topic_id'],candidate['topic_id'])
             item['qa_count'] = db.execute('SELECT COUNT(*) FROM qas q JOIN candidates c ON q.id=c.id WHERE c.document_id=?', (doc_id,)).fetchone()[0]
             item.update(self.pair_counts(db, doc_id))
             item['assets'] = [dict(x) for x in db.execute('SELECT * FROM assets WHERE document_id=?', (doc_id,))]
@@ -343,7 +364,32 @@ class Store:
                    encode({'previous_topics':topics,'previous_terms':previous,'retained':[r['term'] for r in rows],
                            'max_per_document':MAX_DOCUMENT_SEARCH_TERMS}),time.time()))
 
-    def apply_topic_selection(self, doc_id, selected, terms, summary, task_id, worker):
+    def reclassify_topics(self, doc_id):
+        """Enqueue automatic classification through the normal worker; no user selection."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM documents WHERE id=?',(doc_id,)).fetchone():
+                raise ValueError('找不到文件')
+            active = db.execute("SELECT id FROM tasks WHERE document_id=? AND status IN ('queued','running')",(doc_id,)).fetchone()
+            if active:
+                return active['id']
+            task_id = uid()
+            db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',
+                       (task_id,doc_id,'queued','topic_reclassification'))
+            db.execute("UPDATE documents SET status='queued',progress='系统自动概括整篇正式主题，无需手动筛选' WHERE id=?",(doc_id,))
+            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'topic_reclassification_queued',encode({'task_id':task_id}),time.time()))
+            return task_id
+
+    def legacy_topic_context(self, doc_id):
+        with self.connect() as db:
+            rows = db.execute('''SELECT DISTINCT t.* FROM topics t WHERE t.id IN
+                (SELECT topic_id FROM document_topics WHERE document_id=? UNION
+                 SELECT topic_id FROM candidates WHERE document_id=?)''',(doc_id,doc_id)).fetchall()
+            return [dict(id=t['id'],name=t['name'],definition=t['definition'],unit_ids=list(dict.fromkeys(
+                [r[0] for r in db.execute('SELECT unit_id FROM candidates WHERE document_id=? AND topic_id=?',(doc_id,t['id']))]
+                ))) for t in rows]
+
+    def apply_topic_selection(self, doc_id, selected, terms, summary, task_id, worker, *, redirects=None):
         """Register only selected topics and publish classification in one leased transaction."""
         if not MIN_DOCUMENT_TOPICS <= len(selected) <= MAX_DOCUMENT_TOPICS:
             raise ValueError('每篇文件须有1至5个正式主题。')
@@ -369,8 +415,23 @@ class Store:
                 records.append(dict(t, id=topic['id'], unit_ids=set(t['unit_ids'])))
             ids = {t['id'] for t in records}
             required = {r[0] for r in db.execute('SELECT DISTINCT topic_id FROM candidates WHERE document_id=?', (doc_id,))}
-            if not required <= ids:
-                raise ValueError('不能移除历史候选引用的主题，须先审核归类迁移。')
+            by_name = {t['name']:t for t in records}
+            redirects = redirects or {}
+            if any(old not in ids and redirects.get(old) not in by_name for old in required):
+                raise ValueError('整篇主题规划缺少历史候选来源映射，系统需重新规划。')
+            previous_maps = [dict(r) for r in db.execute('SELECT * FROM document_topic_redirects WHERE document_id=?',(doc_id,))]
+            db.execute('DELETE FROM document_topic_redirects WHERE document_id=?',(doc_id,))
+            for old_id, name in redirects.items():
+                if name not in by_name:
+                    raise ValueError('历史来源映射指向未知正式主题。')
+                topic = by_name[name]
+                if old_id==topic['id']:
+                    continue
+                support = sorted({r[0] for r in db.execute('SELECT unit_id FROM candidates WHERE document_id=? AND topic_id=?',(doc_id,old_id))})
+                if not set(support)<=topic['unit_ids']:
+                    raise ValueError('历史来源映射缺少对应真实单元支持，系统需重新规划。')
+                db.execute('INSERT INTO document_topic_redirects VALUES(?,?,?,?,?)',
+                           (doc_id,old_id,topic['id'],encode(support),time.time()))
             db.execute('DELETE FROM document_search_terms WHERE document_id=?', (doc_id,))
             db.execute('DELETE FROM document_topics WHERE document_id=?', (doc_id,))
             # Group a file's fine-term hits under its best supported selected topic,
@@ -388,7 +449,8 @@ class Store:
             db.execute("UPDATE documents SET coverage='complete',summary=? WHERE id=?", (summary,doc_id))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc_id,'document_topics_selected',
                 encode({'previous':previous,'selected_ids':[t['id'] for t in records], 'term_count':len(terms),
-                        'max_per_document':MAX_DOCUMENT_TOPICS}),time.time()))
+                        'max_per_document':MAX_DOCUMENT_TOPICS,'previous_mappings':previous_maps,
+                        'source_mappings':redirects,'policy':'whole_document_direct_v2'}),time.time()))
 
     def add_asset(self, doc_id, path, page, label):
         asset_id = uid()
@@ -402,7 +464,7 @@ class Store:
             db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
             row = db.execute("SELECT * FROM tasks WHERE status='queued'"+
                              (' AND document_id=?' if document_id else '')+
-                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL THEN 1 ELSE 0 END,rowid LIMIT 1",
+                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL THEN 2 WHEN stage='topic_reclassification' THEN 1 ELSE 0 END,rowid LIMIT 1",
                              (document_id,) if document_id else ()).fetchone()
             if not row:
                 return None

@@ -7,6 +7,50 @@ import pymupdf
 
 from .store import digest
 
+LONG_TEXT_THRESHOLD = 16000
+TEXT_CHUNK_SIZE = 16000
+VISUAL_TEXT_NOTICE = 'Read the complete actual page image. Its extracted text is registered separately.'
+
+
+def text_spans(text):
+    """Lossless, non-overlapping slices; ordinary evidence keeps its original shape."""
+    if len(text) <= LONG_TEXT_THRESHOLD:
+        yield 0, len(text)
+        return
+    start = 0
+    while len(text)-start > TEXT_CHUNK_SIZE:
+        end = start+TEXT_CHUNK_SIZE
+        floor = start+TEXT_CHUNK_SIZE*3//4
+        # Prefer a nearby line/sentence boundary; never scan the entire remainder.
+        boundary = text.rfind('\n', floor, end)
+        if boundary < floor:
+            matches = list(re.finditer(r'[。！？.!?；;](?:\s|$)', text[floor:end]))
+            boundary = floor+matches[-1].end()-1 if matches else text.rfind(' ', floor, end)
+        if boundary >= floor:
+            end = boundary+1
+        yield start, end
+        start = end
+    yield start, len(text)
+
+
+def model_text(unit):
+    # The image already contains this full page. Avoid sending its long OCR twice.
+    if unit.get('image') and len(unit['text']) > LONG_TEXT_THRESHOLD:
+        return VISUAL_TEXT_NOTICE
+    return unit['text']
+
+
+def text_view_matches(unit, parent):
+    if not parent or unit.get('companion_of') != parent['id'] or unit.get('image') or not parent.get('image'):
+        return False
+    if parent['text'] == unit['text'] and parent['locator'] == unit['locator']:
+        return True
+    span = unit.get('text_span')
+    return (isinstance(span, list) and len(span)==2 and all(type(x) is int for x in span)
+            and 0 <= span[0] < span[1] <= len(parent['text'])
+            and unit.get('page') == parent.get('page')
+            and unit['text'] == parent['text'][span[0]:span[1]])
+
 
 def pdf_paragraphs(text):
     return [x.strip() for x in re.split(r'\n\s*\n', text) if x.strip()]
@@ -54,18 +98,25 @@ def text_alternatives(units):
     """Keep frozen visual evidence and add a text view at the same true locator."""
     result = list(units)
     ids = {u['id'] for u in units}
+    fragment_parents = {u.get('companion_of') for u in units if 'text_span' in u}
     for unit in units:
         text = unit['text']
         readable = len(text)>=120 and (len(re.findall('[\u4e00-\u9fff]',text))>=30
                                       or len(re.findall('[A-Za-z]',text))>=80)
-        if not unit['image'] or not readable or unit['id']+':text' in ids:
+        if not unit['image'] or not readable or unit['id']+':text' in ids or unit['id'] in fragment_parents:
             continue
-        alternative = dict(unit, id=unit['id']+':text', image='', asset_id='',
-                           companion_of=unit['id'], evidence_kind='extracted_text')
-        alternative.pop('hash', None)
-        alternative['hash'] = digest(alternative)
-        result.append(alternative)
-        ids.add(alternative['id'])
+        for index, (start, end) in enumerate(text_spans(text), 1):
+            alternative = dict(unit, id=unit['id']+':text', image='', asset_id='',
+                               companion_of=unit['id'], evidence_kind='extracted_text')
+            if len(text)>LONG_TEXT_THRESHOLD:
+                seg = unit['seg']+index
+                alternative.update(id=unit['id']+f':text:{index}', text=text[start:end], seg=seg,
+                                   locator=f'page-{unit["page"]:04d}-seg-{seg:04d}', text_span=[start,end])
+            alternative.pop('hash', None)
+            alternative['hash'] = digest(alternative)
+            result.append(alternative)
+            ids.add(alternative['id'])
+        fragment_parents.add(unit['id'])
     return result
 
 
@@ -74,14 +125,27 @@ def extract(store, doc, config, progress=None):
     folder = store.root / 'assets/images' / doc['id']
     folder.mkdir(parents=True, exist_ok=True)
     units = []
+    seg_offsets = {}
 
     def add(text, page, seg, image='', asset_id='', locator=None, **metadata):
-        locator = locator or f'page-{page:04d}-seg-{seg:04d}'
-        unit = {'id': f'{doc["id"]}:p{page}:s{seg}', 'text': text, 'page': page, 'seg': seg,
-                'locator': locator, 'image': image, 'asset_id': asset_id,
-                'language': 'zh' if re.search('[\u4e00-\u9fff]', text) else 'en', **metadata}
-        unit['hash'] = digest(unit)
-        units.append(unit)
+        spans = [(0,len(text))] if image else list(text_spans(text))
+        offset = seg_offsets.get(page, 0)
+        for index, (start,end) in enumerate(spans):
+            actual_seg = seg+offset+index
+            actual_locator = locator or f'page-{page:04d}-seg-{actual_seg:04d}'
+            if locator and locator.startswith('seg-'):
+                actual_locator = f'seg-{actual_seg:04d}'
+            elif locator and len(spans)>1:
+                actual_locator += f'-seg-{index+1:04d}'
+            part = text[start:end]
+            unit = {'id': f'{doc["id"]}:p{page}:s{actual_seg}', 'text': part, 'page': page, 'seg': actual_seg,
+                    'locator': actual_locator, 'image': image, 'asset_id': asset_id,
+                    'language': 'zh' if re.search('[\u4e00-\u9fff]', part) else 'en', **metadata}
+            if len(spans)>1:
+                unit.update(text_span=[start,end], source_block=locator or f'page-{page:04d}-seg-{seg:04d}')
+            unit['hash'] = digest(unit)
+            units.append(unit)
+        seg_offsets[page] = offset+len(spans)-1
 
     suffix = path.suffix.lower()
     if suffix == '.pdf':
@@ -144,8 +208,6 @@ def extract(store, doc, config, progress=None):
     if not units:
         raise ValueError('没有可读取证据')
     for unit in units:
-        if len(unit['text']) > 16000:
-            raise ValueError('完整证据单元过长，初版不截断；请拆分来源或调整准备方案。')
         if unit['image'] and Path(unit['image']).stat().st_size > 5*1024*1024:
             raise ValueError('图像超过初版 5MB 输入限额，未生成视觉 QA。')
     return text_alternatives(units), pages

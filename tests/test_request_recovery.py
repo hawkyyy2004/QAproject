@@ -33,6 +33,10 @@ def analysis(units):
             'keywords':['温度'], 'importance':3}]}
 
 
+def facts(units):
+    return {'summary':'隔离事实。','facts':[{'unit_id':u['id'],'focus':'温度观测记录。','keywords':['温度']} for u in units]}
+
+
 def events(store, kind):
     with store.connect() as db:
         return [json.loads(x[0]) for x in db.execute('SELECT detail FROM events WHERE kind=? ORDER BY created',(kind,))]
@@ -48,12 +52,14 @@ def test_analysis_expands_budget_without_repeating_complete_batches(tmp_path, mo
     store, doc_id, units = setup_document(tmp_path)
     calls = []
     def call(self, instruction, payload, group=(), **kw):
-        if 'existing_topics' not in payload:
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)), {}
+        if 'existing_topics' not in payload and payload.get('analysis_phase')!='facts':
             return {'pairs':[], 'skipped':[]}, {}
         calls.append((kw['max_tokens'],[u['id'] for u in group]))
         if kw['max_tokens']<16384:
             raise ProviderError('截断','length',{'finish_reason':'length', 'usage':{'completion_tokens':8192}})
-        return analysis(group), {}
+        return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)), {}
     monkeypatch.setattr(GLMClient,'call',call)
     doc = process(store,doc_id)
     assert doc['coverage']=='complete' and doc['status']=='insufficient', doc['error']
@@ -67,7 +73,9 @@ def test_multi_image_400_splits_and_resume_reuses_children(tmp_path, monkeypatch
     seen = []
     fail_second = True
     def call(self, instruction, payload, group=(), **kw):
-        if 'existing_topics' not in payload:
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)), {}
+        if 'existing_topics' not in payload and payload.get('analysis_phase')!='facts':
             return {'pairs':[], 'skipped':[]}, {}
         seen.append([u['id'] for u in group])
         assert all(Path(u['image']).read_bytes().startswith(b'actual-image') for u in group)
@@ -75,7 +83,7 @@ def test_multi_image_400_splits_and_resume_reuses_children(tmp_path, monkeypatch
             raise ProviderError('拒绝','http',{'http_status':400,'images':2})
         if group[0]['id']==units[1]['id'] and fail_second:
             raise ProviderError('超时','timeout',{})
-        return analysis(group), {}
+        return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)), {}
     monkeypatch.setattr(GLMClient,'call',call)
     doc = process(store,doc_id)
     assert doc['status']=='failed' and doc['coverage']!='complete' and not doc['topics']
@@ -116,12 +124,14 @@ def test_analysis_splits_complete_units_and_exhausted_leaf_never_publishes(tmp_p
     monkeypatch.setattr('qaproject.pipeline.settings',lambda:cfg)
     seen = []
     def call(self,instruction,payload,group=(),**kw):
-        if 'existing_topics' not in payload:
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
+        if 'existing_topics' not in payload and payload.get('analysis_phase')!='facts':
             return {'pairs':[],'skipped':[]},{}
         seen.append(group)
         if len(group)>1:
             raise ProviderError('测试恢复',code,{})
-        return analysis(group),{}
+        return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
     monkeypatch.setattr(GLMClient,'call',call)
     doc=process(store,doc_id)
     assert doc['coverage']=='complete' and len(seen)==3
@@ -132,6 +142,8 @@ def test_unrecoverable_length_is_bounded_and_never_saved_as_complete(tmp_path,mo
     store,doc_id,_=setup_document(tmp_path,count=1)
     calls=[]
     def call(self,instruction,payload,group=(),**kw):
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
         calls.append(kw['max_tokens'])
         raise ProviderError('截断','length',{'finish_reason':'length'})
     monkeypatch.setattr(GLMClient,'call',call)
@@ -146,12 +158,14 @@ def test_legacy_complete_analysis_cache_survives_budget_change(tmp_path,monkeypa
     cfg=settings()
     from qaproject.glm import ANALYZE
     from qaproject.pipeline import compact_units
-    request={'kind':'analysis','prompt':ANALYZE,'payload':{'units':compact_units(units),
+    request={'kind':'analysis','prompt':ANALYZE,'payload':{'analysis_phase':'document','legacy_topics':[],'units':compact_units(units),
              'existing_topics':[{k:t[k] for k in ('name','definition','aliases')} for t in store.topics()]},
              'units':units,'config':{k:cfg.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')},
              'max_tokens':2048,'review_attempt':None}
     (store.root/'runs'/(digest(request)+'.json')).write_text(encode({'result':analysis(units),'stats':{}}))
     def call(self,instruction,payload,group=(),**kw):
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
         assert 'existing_topics' not in payload, 'Complete legacy analysis should be reused'
         return {'pairs':[],'skipped':[]},{}
     monkeypatch.setattr(GLMClient,'call',call)
@@ -163,14 +177,16 @@ def test_legacy_complete_analysis_cache_survives_budget_change(tmp_path,monkeypa
 def test_visual_generation_and_review_split_keep_bilingual_binding(tmp_path,monkeypatch,failing_stage):
     store,doc_id,units=setup_document(tmp_path,images=2)
     # Input has enough text that analysis uses text; generation still tests true image units.
-    cfg=dict(settings(),target_per_document=2,min_per_document=2)
+    cfg=dict(settings(),target_per_document=2,min_per_document=2,generation_max_images=2)
     monkeypatch.setattr('qaproject.pipeline.settings',lambda:cfg)
     seen=[]
     def call(self,instruction,payload,group=(),**kw):
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
         stage='analysis' if 'existing_topics' in payload else ('review' if 'candidates' in payload else 'generation')
         seen.append((stage,len(group)))
         if stage=='analysis':
-            return analysis(group),{}
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
         if stage==failing_stage and len(group)>1:
             raise ProviderError('多图拒绝','http',{'http_status':400,'images':2})
         if stage=='review':
@@ -213,12 +229,16 @@ def test_http_400_fallback_transmits_each_original_image_and_restores_ids(tmp_pa
     def respond(request):
         body=json.loads(request.content)
         content=body['messages'][1]['content']
-        payload=json.loads(content[0]['text'])
-        images=[base64.b64decode(c['image_url']['url'].split(',',1)[1]) for c in content if c['type']=='image_url']
+        payload=json.loads(content[0]['text']) if isinstance(content,list) else json.loads(content)
+        images=[base64.b64decode(c['image_url']['url'].split(',',1)[1]) for c in content if isinstance(c,dict) and c['type']=='image_url']
         seen.append(images)
         if len(images)==2:
             return httpx.Response(400,json={'error':{'message':'images: 2 rejected; echoed private input'}})
-        if 'existing_topics' in payload:
+        if payload.get('analysis_phase')=='facts':
+            result=facts(payload['units'])
+        elif 'document_facts' in payload:
+            result=analysis([{'id':f['unit_id']} for f in payload['document_facts']])
+        elif 'existing_topics' in payload:
             result=analysis(payload['units'])
         else:
             result={'pairs':[],'skipped':[]}
@@ -239,12 +259,14 @@ def test_single_image_transient_400_recovers_without_losing_page(tmp_path,monkey
     store,doc_id,units=setup_document(tmp_path,images=1,count=1)
     calls=[]
     def call(self,instruction,payload,group=(),**kw):
-        if 'existing_topics' not in payload:
+        if 'document_facts' in payload:
+            return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
+        if 'existing_topics' not in payload and payload.get('analysis_phase')!='facts':
             return {'pairs':[],'skipped':[]},{}
         calls.append(group)
         if len(calls)==1:
             raise ProviderError('单图偶发拒绝','http',{'http_status':400,'images':1})
-        return analysis(group),{}
+        return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}
     monkeypatch.setattr(GLMClient,'call',call)
     monkeypatch.setattr('qaproject.pipeline.time.sleep',lambda _:None)
     doc=process(store,doc_id)

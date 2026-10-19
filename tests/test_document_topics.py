@@ -22,46 +22,38 @@ def proposal(name, unit, importance=2, keywords=None):
                 importance=importance, keywords=keywords or [name+'细词'], unit_ids=[unit['id']])
 
 
-def test_twenty_four_batch_topics_become_five_without_extra_model_call(tmp_path, monkeypatch):
+def facts(units):
+    return dict(summary='隔离观测内容。', facts=[dict(unit_id=u['id'],focus='温度观测方法与结果。',keywords=['温度']) for u in units])
+
+
+def test_many_evidence_batches_generate_formal_topics_once_after_all_facts(tmp_path, monkeypatch):
     store = Store(tmp_path/'live')
     doc_id, _ = store.import_file('synthetic.txt', b'synthetic classification test', 'live')
-    units = [evidence(n, '隔离观测证据。'*900) for n in range(1, 13)]
+    units = [evidence(n, '隔离观测证据。'*900) for n in range(1,13)]
     store.update_document(doc_id, units=units)
-    calls = []
-
+    seen, plans = [], []
     def call(self, instruction, payload, units=(), **kwargs):
+        if payload.get('analysis_phase')=='facts':
+            assert 'existing_topics' not in payload and 'topics' not in payload
+            assert not store.document(doc_id)['topics']
+            seen.extend(u['id'] for u in units)
+            return facts(units), {}
         if 'existing_topics' in payload:
-            n = int(units[0]['locator'].split('-')[1])
-            calls.append(n)
-            # The core topic appears late: do not keep the first five proposals.
-            main = '海洋观测' if n >= 11 else f'次要领域{n}'
-            result = dict(summary='隔离观测。', topics=[proposal(main, units[0], 3 if n >= 11 else 1),
-                                                      proposal(f'测试领域{n}', units[0], 2)])
-        else:
-            result = {'pairs':[], 'skipped':['仅验证分类，不补造考点。']}
-        return result, {'seconds':0, 'model':'mock'}
-
-    monkeypatch.setattr(GLMClient, 'call', call)
+            assert len(seen)==12 and len(payload['document_facts'])==12
+            assert len(payload['units'])==1  # First generation shares the single formal-topic request.
+            plans.append(payload)
+            return dict(summary='整篇海洋观测。', topics=[dict(proposal('海洋观测', units[0]),
+                unit_ids=[u['unit_id'] for u in payload['document_facts']])],pairs=[],skipped=[]), {}
+        return {'pairs':[], 'skipped':[]}, {}
+    monkeypatch.setattr(GLMClient,'call',call)
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
-    assert doc['coverage']=='complete' and len(doc['topics'])==5, doc['error']
-    assert '海洋观测' in {t['name'] for t in doc['topics']}
-    assert sorted(calls)==list(range(1, 13))  # Whole-document evidence, no consolidation call.
-    assert len([t for t in store.topics() if t['documents']])==5
-    assert not any(t['name']=='测试领域12' for t in store.topics())  # No orphan formal topics.
-    terms = {t['term']: t['unit_ids'] for t in doc['search_terms']}
-    assert len(terms)==10
-    assert terms['海洋观测细词']==sorted([u['id'] for u in units[-2:]])
-    assert '测试领域12细词' not in terms
-    # Fine-term support never becomes formal-topic generation permission.
-    fine_hit = store.search('海洋观测细词')
-    assert {d['id'] for r in fine_hit for d in r['documents']}=={doc_id}
-    second, _ = store.import_file('other.txt', b'unrelated evidence', 'live')
-    store.link_topic(second, store.topic('海洋观测')['id'], ['另一检索方向'], [])
-    assert {d['id'] for r in store.search('海洋观测细词') for d in r['documents']}=={doc_id}
-    with store.connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='document_topics_selected'").fetchone()[0]==1
+    assert doc['coverage']=='complete' and len(doc['topics'])==1, doc['error']
+    assert set(seen)=={u['id'] for u in units} and len(plans)==1
+    assert set(doc['topics'][0]['unit_ids'])==set(seen)
+    assert {t['name'] for t in store.topics() if t['documents']}=={'海洋观测'}
+    assert not any(t['name'].startswith('温度观测') for t in store.topics())
 
 
 def test_limit_is_per_document_not_whole_library_and_updates_are_allowed(tmp_path):
@@ -89,9 +81,9 @@ def test_alias_reuse_and_coverage_count_real_locations_not_views(tmp_path):
     selection.add(dict(summary='', topics=[proposal('海洋观测', view)]), [view])
     selection.add(dict(summary='', topics=[proposal('数学', other, 3)]), [other])
     selected, _ = selection.select()
-    assert len(selected)==2 and selected[0]['name']=='数学'
-    assert selected[1]['name']=='海洋观测' and len(selected[1]['locations'])==1
-    assert selected[1]['unit_ids']=={unit['id'], view['id']}
+    assert len(selected)==2 and selected[0]['name']=='海洋观测'
+    assert len(selected[0]['locations'])==1
+    assert selected[0]['unit_ids']=={unit['id'], view['id']}
 
 
 def test_empty_classification_is_failure_not_success_or_placeholder(tmp_path, monkeypatch):
@@ -114,13 +106,15 @@ def test_failed_analysis_never_publishes_partial_topics_and_resumes_cached_batch
     fail = True
 
     def call(self, instruction, payload, units=(), **kw):
-        if 'existing_topics' not in payload:
-            return {'pairs':[], 'skipped':[]}, {}
-        n = int(units[0]['locator'].split('-')[1])
-        calls.append(n)
-        if n==2 and fail:
-            raise ProviderError('测试超时。', 'timeout', {})
-        return dict(summary='隔离摘要。', topics=[proposal('海洋观测', units[0])]), {}
+        if payload.get('analysis_phase')=='facts':
+            n = int(units[0]['locator'].split('-')[1])
+            calls.append(n)
+            if n==2 and fail:
+                raise ProviderError('测试超时。','timeout',{})
+            return facts(units), {}
+        if 'existing_topics' in payload:
+            return dict(summary='整篇观测。',topics=[dict(proposal('海洋观测',units[0]),unit_ids=[f['unit_id'] for f in payload['document_facts']])],pairs=[],skipped=[]), {}
+        return {'pairs':[],'skipped':[]}, {}
 
     monkeypatch.setattr(GLMClient, 'call', call)
     worker = Worker(store)
@@ -169,8 +163,6 @@ def test_history_is_not_reclassified_without_preserving_candidate_references(tmp
         store.apply_topic_selection(doc_id, selected, terms, '', task['id'], 'worker')
     assert [t['name'] for t in store.document(doc_id)['topics']]==['数学']
     assert not any(t['name']=='全新领域' for t in store.topics())
-    with pytest.raises(ValueError, match='超过5个'):
-        selection.select([f'history{n}' for n in range(6)])
 
 
 def test_request_local_ids_reduce_payload_and_restore_real_evidence_refs(monkeypatch):
@@ -237,31 +229,39 @@ def test_legacy_over_limit_classification_is_reselected_not_reused(tmp_path, mon
     def call(self, instruction, payload, units=(), **kwargs):
         if 'existing_topics' in payload:
             calls.append('analysis')
-            return dict(summary='按全文重新筛选。', topics=[proposal(t['name'], unit) for t in historical]), {}
+            return dict(summary='整篇直接概括。', topics=[proposal('海洋观测',unit)],
+                        legacy_topic_map={t['id']:'海洋观测' for t in historical}), {}
         return {'pairs':[], 'skipped':[]}, {}
 
     monkeypatch.setattr(GLMClient, 'call', call)
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
-    assert len(doc['topics'])==5 and calls==['analysis']
+    assert len(doc['topics'])==1 and calls==['analysis']
     assert len([t for t in store.topics() if t['name'].startswith('历史领域')])==7  # Stable historical IDs.
     with store.connect() as db:
         event = json.loads(db.execute("SELECT detail FROM events WHERE kind='document_topics_selected'").fetchone()[0])
     assert len(event['previous'])==7
 
 
-def test_first_page_priority_uses_real_source_order_for_appended_text_view(tmp_path):
-    store = Store(tmp_path/'live')
-    units = [evidence(n) for n in range(1, 7)]
-    view = dict(units[0], id=units[0]['id']+':text', companion_of=units[0]['id'])
-    selection = TopicSelection(store.topics(), [*units, view])
-    # Text companions are appended during parsing, but still belong to page 1.
-    for n, unit in enumerate([*units[1:], view], 1):
-        selection.add(dict(summary='', topics=[proposal(f'测试领域{n}', unit)]), [unit])
-    selected, _ = selection.select()
-    assert selected[0]['name']=='测试领域6'
-    assert '测试领域5' not in {t['name'] for t in selected}
+def test_more_than_five_model_labels_are_not_truncated_or_published(tmp_path,monkeypatch):
+    store=Store(tmp_path/'live')
+    doc_id,_=store.import_file('plan.txt',b'synthetic correction','live')
+    calls=[]
+    def call(self,instruction,payload,units=(),**kw):
+        if 'existing_topics' in payload:
+            calls.append(payload)
+            if len(calls)==1:
+                return dict(summary='错误输出。',topics=[proposal(f'过细方向{n}',units[0]) for n in range(8)]),{}
+            assert 'automatic_regeneration' in payload
+            return dict(summary='概括为海洋观测。',topics=[proposal('海洋观测',units[0])]),{}
+        return {'pairs':[],'skipped':[]},{}
+    monkeypatch.setattr(GLMClient,'call',call)
+    worker=Worker(store)
+    worker.process(store.claim(worker.name))
+    doc=store.document(doc_id)
+    assert [t['name'] for t in doc['topics']]==['海洋观测'],doc['error']
+    assert len(calls)==2 and not any(t['name'].startswith('过细方向') for t in store.topics())
 
 
 def test_invalid_new_topic_is_deferred_without_blocking_valid_core_or_faking_reason(tmp_path):

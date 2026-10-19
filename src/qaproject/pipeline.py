@@ -7,12 +7,13 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from .glm import GLMClient, ProviderError, ANALYZE, GENERATE, REVIEW, REPAIR
-from .parsers import extract, text_alternatives
+from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REPAIR
+from .parsers import extract, text_alternatives, model_text, text_view_matches
 from .settings import FIELDS, settings, source_ref
 from .store import Store, uid, digest, encode, normalized
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection
+from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
 
 CHECKS = ['supported', 'independent', 'scope_correct', 'knowledge_value', 'distinct', 'topic_correct']
 BILINGUAL_CHECKS = ['language_correct', 'translation_consistent']
@@ -156,12 +157,16 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
             asset = db.execute('SELECT * FROM assets WHERE id=?', (unit['asset_id'],)).fetchone()
             if not asset or not file_matches(row['image'],asset['hash']):
                 raise ValueError('图片内容已变更。')
-        if not db.execute('SELECT 1 FROM document_topics WHERE document_id=? AND topic_id=?', (d['id'], topic['id'])).fetchone():
+        associated = db.execute('SELECT 1 FROM document_topics WHERE document_id=? AND topic_id=?', (d['id'], topic['id'])).fetchone()
+        if not associated:
+            associated = db.execute('''SELECT 1 FROM document_topic_redirects m JOIN document_topics dt
+                ON dt.document_id=m.document_id AND dt.topic_id=m.topic_id
+                WHERE m.document_id=? AND m.old_topic_id=? AND EXISTS
+                (SELECT 1 FROM json_each(m.unit_ids) WHERE value=?)''', (d['id'],topic['id'],c['unit_id'])).fetchone()
+        if not associated:
             raise ValueError('主题关联已失效。')
         if c['status']=='approved':
             return {'approved':True,'already_committed':True}
-        if not 1 <= db.execute('SELECT COUNT(*) FROM document_topics WHERE document_id=?', (d['id'],)).fetchone()[0] <= MAX_DOCUMENT_TOPICS:
-            raise ValueError('文件须先完成1至5个正式主题的归类，历史内容需另行审核迁移。')
         membership = db.execute('SELECT pair_id FROM candidate_pairs WHERE candidate_id=?',(candidate_id,)).fetchone()
         if membership:
             siblings = [dict(x,row=json.loads(x['row_json'])) for x in db.execute('''SELECT c.*,m.language AS pair_language FROM candidates c
@@ -198,7 +203,7 @@ def approve(store, candidate_id, reviewed, expected_hash, *, dry_run=False, veri
 def batches(units, limit=12000, max_units=32, max_images=2):
     group, chars, images = [], 0, 0
     for unit in units:
-        extra = len(unit['text'])
+        extra = len(model_text(unit))
         visual = int(bool(unit['image']))
         if group and (chars+extra > limit or images+visual > max_images or len(group) >= max_units):
             yield group
@@ -211,7 +216,26 @@ def batches(units, limit=12000, max_units=32, max_images=2):
 
 
 def compact_units(units):
-    return [{k:u[k] for k in ('id','text','language')} for u in units]
+    return [dict(id=u['id'], text=model_text(u), language=u['language']) for u in units]
+
+
+def content_facts(result, group):
+    """Check compact batch notes cover every unit, without per-unit prose overhead."""
+    items = result.get('facts')
+    allowed = {u['id'] for u in group}
+    seen = []
+    if not isinstance(items,list):
+        raise ValueError('内容要点未完整对应全部证据，系统保留已完成批次以便恢复。')
+    for fact in items:
+        if not isinstance(fact,dict) or not isinstance(fact.get('focus'),str) or len(fact['focus'])>600:
+            raise ValueError('内容要点格式无效。')
+        refs = fact.get('unit_ids',[fact.get('unit_id')])
+        if not isinstance(refs,list) or not refs or any(not isinstance(x,str) or x not in allowed for x in refs):
+            raise ValueError('内容要点引用了未发送的单元。')
+        seen.extend(refs)
+    if len(seen)!=len(allowed) or set(seen)!=allowed:
+        raise ValueError('内容要点未完整对应全部证据，系统保留已完成批次以便恢复。')
+    return items
 
 
 def bounded_analysis(groups, run, concurrency):
@@ -298,7 +322,33 @@ class Worker:
                 # Split only at frozen unit boundaries. Never trim source text or images.
                 parts = (list(batches(group, max_images=1)) if single_image else
                          [group[:len(group)//2], group[len(group)//2:]])
-                result = {'summary':'', 'topics':[]} if kind=='analysis' else (
+                if instruction==PLAN_AND_GENERATE:
+                    # Only the failure path separates planning from generation.
+                    # Formal topics are still produced once for the whole file.
+                    refs = [dict(id=u['id'],image='',text='',language=u['language']) for u in group]
+                    plan_result = call_cached('topic_plan', ANALYZE, {k:payload[k] for k in
+                        ('document_facts','existing_topics','legacy_topics')},refs)
+                    if not isinstance(plan_result.get('topics'),list) or not 1<=len(plan_result['topics'])<=MAX_DOCUMENT_TOPICS:
+                        raise ValueError('整篇主题规划需要系统重新生成。')
+                    actual_ids = {u['id'] for u in payload['units']}
+                    actual = [u for u in group if u['id'] in actual_ids]
+                    generation = {'units':payload['units'],'target':payload['target'],'existing_questions':payload['existing_questions'],
+                                  'evidence_mode':payload.get('evidence_mode'),
+                                  'topics':[dict(name=t['name'],unit_ids=[x for x in t['unit_ids'] if x in actual_ids])
+                                            for t in plan_result['topics'] if actual_ids.intersection(t['unit_ids'])]}
+                    generated = (call_cached('generation', GENERATE,generation,actual) if generation['topics'] else
+                                 {'pairs':[],'skipped':['首批证据无对应整篇主题知识点。']})
+                    return dict(plan_result,**generated)
+                if kind=='analysis' and payload.get('analysis_phase')=='document':
+                    facts = []
+                    for part in parts:
+                        answer = call_cached('analysis', FACTS, {'analysis_phase':'facts','units':compact_units(part)},part)
+                        facts.extend(content_facts(answer,part))
+                    refs = [dict(id=u['id'],image='',text='',language=u['language']) for u in group]
+                    return call_cached('topic_plan', ANALYZE, dict(existing_topics=payload['existing_topics'],
+                        legacy_topics=payload.get('legacy_topics',[]),document_facts=facts),refs)
+                analysis_key = 'facts' if payload.get('analysis_phase')=='facts' else 'topics'
+                result = {'summary':'', analysis_key:[]} if kind=='analysis' else (
                          {'pairs':[], 'skipped':[]} if kind=='generation' else {'checks':[]})
                 for part in parts:
                     support = {u['id'] for u in part}
@@ -322,14 +372,15 @@ class Worker:
                             for v in c['versions']]
                     answer = call_cached(kind, instruction, child, part)
                     if kind=='analysis':
-                        if not isinstance(answer.get('summary'),str) or not isinstance(answer.get('topics'),list):
+                        if not isinstance(answer.get('summary'),str) or not isinstance(answer.get(analysis_key),list):
                             raise ValueError('分析响应结构无效，未发布不完整分类。')
-                        for topic in answer['topics']:
-                            if not isinstance(topic,dict) or not isinstance(topic.get('unit_ids'),list) or any(
-                                    not isinstance(x,str) or x not in support for x in topic['unit_ids']):
+                        for topic in answer[analysis_key]:
+                            refs = topic.get('unit_ids',[topic.get('unit_id')]) if analysis_key=='facts' and isinstance(topic,dict) else topic.get('unit_ids',[]) if isinstance(topic,dict) else None
+                            if not isinstance(topic,dict) or not isinstance(refs,list) or any(
+                                    not isinstance(x,str) or x not in support for x in refs):
                                 raise ValueError('拆分分析引用了未发送的证据，未发布分类。')
                         result['summary'] += ('\n' if result['summary'] else '')+answer['summary']
-                        result['topics'].extend(answer['topics'])
+                        result[analysis_key].extend(answer[analysis_key])
                     elif kind=='generation':
                         # Validate before using a child response as context for the next call.
                         if not isinstance(answer.get('pairs'),list) or not isinstance(answer.get('skipped'),list):
@@ -380,7 +431,7 @@ class Worker:
                         continue
                     splittable = error.code in {'length','json','context'} or image_400 or (
                         error.code=='http' and error.stats.get('http_status')==400 and category in {'context','output_limit'})
-                    if len(group)>1 and splittable:
+                    if kind!='topic_plan' and len(group)>1 and splittable:
                         single_image = bool(image_400 and images>1)
                         if single_image:
                             single_image_requests.set()
@@ -460,7 +511,7 @@ class Worker:
                     if len(versions)!=2 or any(c['status'] in ('approved','rejected') for c in versions):
                         raise ValueError('本组含已完成或缺失的版本，不能自动改写，请保留历史并处理异常。')
                     unit = next(u for u in all_units if u['id']==versions[0]['unit_id'])
-                    topic = next(t for t in latest['topics'] if t['id']==versions[0]['topic_id'])
+                    topic = next(t for t in [*latest['topics'],*latest.get('historical_topics',[])] if t['id']==versions[0]['topic_id'])
                     previous = versions[0]['review']
                     if (previous.get('local_flags') and all(previous.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
                             and not any(quality_flags(c['row']) for c in versions)
@@ -543,7 +594,7 @@ class Worker:
                                 verification_cache=verification_cache)
                 count += 1
             existing = [c['row']['input'] for c in latest['candidates'] if c['status']!='rejected']
-            return count, existing
+            return count, existing, modality_counts(latest['candidates'])
 
         def defer_quality():
             if task.get('stage')=='quality_queued':
@@ -573,7 +624,7 @@ class Worker:
                 key = target.get('pair_id') or target['id']
                 selected = [c for c in doc['candidates'] if (c.get('pair_id') or c['id'])==key]
                 unit = next(u for u in doc['units'] if u['id']==target['unit_id'])
-                topic = next(t for t in doc['topics'] if t['id']==target['topic_id'])
+                topic = next(t for t in [*doc['topics'],*doc.get('historical_topics',[])] if t['id']==target['topic_id'])
                 for c in selected:
                     validate_row(c['row'],unit,topic,doc['path'])
                 if target.get('pair_id') and (len(selected)!=2 or {c['row']['language'] for c in selected}!={'zh','en'}):
@@ -608,47 +659,123 @@ class Worker:
                 store.task_update(task['id'], self.name, 'parsed_demo', 'succeeded')
                 return
             unit_map = {u['id']:u for u in units}
+            if task.get('stage')=='topic_reclassification':
+                if hashlib.sha256(Path(doc['path']).read_bytes()).hexdigest()!=doc['content_hash']:
+                    raise ValueError('原文件已变更，不能更新冻结证据的主题映射。')
+                assets = {a['id']:a for a in doc['assets']}
+                checked_images = set()
+                for unit in units:
+                    frozen = dict(unit)
+                    expected = frozen.pop('hash')
+                    if digest(frozen)!=expected:
+                        raise ValueError('冻结证据已变更，不能更新主题映射。')
+                    if unit['image'] and unit['image'] not in checked_images:
+                        asset = assets.get(unit['asset_id'])
+                        if not asset or hashlib.sha256(Path(unit['image']).read_bytes()).hexdigest()!=asset['hash']:
+                            raise ValueError('冻结图片已变更，不能更新主题映射。')
+                        checked_images.add(unit['image'])
             covered = {u['companion_of'] for u in units if u.get('companion_of')}
             # Text-backed pages are classified from their actual extracted text;
             # pages lacking a text layer still receive full visual analysis.
             text_units = [u for u in units if not u['image']]
             visual_units = [u for u in units if u['image']]
             groups = list(batches(text_units))+list(batches(u for u in visual_units if u['id'] not in covered))
-            generation_groups = list(batches(text_units))+list(batches(visual_units))
-            stage('analyzing', f'梗概与主题 0/{len(groups)} 批')
-            summaries = []
+            limits = generation_limits(config)
+            text_groups = list(batches(text_units))
+            visual_groups = list(batches(sorted(visual_units, key=visual_priority),
+                                         max_images=max(1,min(2,int(config.get('generation_max_images',1))))))
+            generation_groups = text_groups + visual_groups
+            stage('analyzing', '读取全文并生成整篇概括主题')
             catalog = store.topics()
             known_topics = [{k:t[k] for k in ('name','definition','aliases')} for t in catalog]
-            selection = TopicSelection(catalog, units)
-
-            def analyze(group):
-                return call_cached('analysis', ANALYZE, {'units':compact_units(group), 'existing_topics':known_topics}, group)
-
+            legacy = store.legacy_topic_context(doc['id'])
+            initial_generation = None
             concurrency = max(1, min(2, int(config.get('analysis_concurrency', 1))))
-            reuse_analysis = doc['coverage']=='complete' and 1 <= len(doc['topics']) <= MAX_DOCUMENT_TOPICS
+            force_reclassification = task.get('stage')=='topic_reclassification'
+            reuse_analysis = (not force_reclassification and doc['coverage']=='complete'
+                              and 1 <= len(doc['topics']) <= MAX_DOCUMENT_TOPICS)
             if reuse_analysis:
                 for topic in doc['topics']:
                     support = set(topic['unit_ids'])
                     for u in text_units:
                         parent = unit_map.get(u.get('companion_of'))
-                        if parent and parent['id'] in support and parent['text']==u['text'] and parent['locator']==u['locator']:
+                        if text_view_matches(u, parent) and parent['id'] in support:
                             support.add(u['id'])
+                        if text_view_matches(u, parent) and u['id'] in support:
+                            support.add(parent['id'])
                     if support != set(topic['unit_ids']):
                         store.link_topic(doc['id'], topic['id'], [], sorted(support))
                 store.event(doc['id'],'analysis_resumed',{'run_id':run_id,'coverage':'complete'})
-                store.update_document(doc['id'],progress='复用已完成的梗概与主题')
-            results = () if reuse_analysis else bounded_analysis(groups, analyze, concurrency)
-            for index, (group, result) in enumerate(results, 1):
-                deferred_before = len(selection.deferred)
-                selection.add(result, group)
-                for deferred in selection.deferred[deferred_before:]:
-                    store.event(doc['id'], 'topic_proposal_deferred', dict(deferred, run_id=run_id))
-                summaries.append(result['summary'])
-                store.update_document(doc['id'], progress=f'梗概与主题 {index}/{len(groups)} 批')
-            if not reuse_analysis:
-                selected, terms = selection.select(c['topic_id'] for c in doc['candidates'])
-                store.apply_topic_selection(doc['id'], selected, terms, '\n'.join(summaries), task['id'], self.name)
+                store.update_document(doc['id'],progress='复用已完成的整篇分类')
+            else:
+                topic_units = [u for group in groups for u in group]
+                if len(groups)==1:
+                    payload = {'analysis_phase':'document','units':compact_units(groups[0]),'existing_topics':known_topics,'legacy_topics':legacy}
+                    # Failure recovery may split evidence reading. Its intermediate
+                    # responses contain facts only; they must never create topic lists.
+                    kind, plan_group, instruction = 'analysis', groups[0], ANALYZE
+                else:
+                    facts = []
+                    def analyze_facts(group):
+                        return call_cached('analysis', FACTS, {'analysis_phase':'facts','units':compact_units(group)}, group)
+                    for index, (group, result) in enumerate(bounded_analysis(groups, analyze_facts, concurrency), 1):
+                        facts.extend(content_facts(result,group))
+                        store.update_document(doc['id'],progress=f'全文内容读取 {index}/{len(groups)} 批；尚未创建正式主题')
+                    payload = {'document_facts':facts,'existing_topics':known_topics,'legacy_topics':legacy}
+                    plan_group = [dict(id=u['id'],image='',text='',language=u['language'],hash=u['hash']) for u in topic_units]
+                    kind, instruction = 'topic_plan', ANALYZE
+                    if not doc['candidates']:
+                        # Reuse the first generation request for the single whole-document
+                        # plan. Reading remains parallel and normal call count stays N+4.
+                        first_group = generation_groups[0]
+                        first_ids = {u['id'] for u in first_group}
+                        reference_ids = {v['id'] for v in topic_units}
+                        plan_group = [u if u['id'] in first_ids else dict(id=u['id'],image='',text='',language=u['language'],hash=u['hash'])
+                                      for u in units if u['id'] in first_ids or u['id'] in reference_ids]
+                        first_mode = 'visual' if first_group[0]['image'] else 'text'
+                        first_limit = limits['visual'] if first_mode=='visual' else min(3,limits['text']) if visual_groups else limits['text']
+                        payload.update(units=compact_units(first_group),target=min(3,max(1,int(config.get('generation_batch_size',3))),first_limit),
+                                       evidence_mode=first_mode, existing_questions=[])
+                        kind, instruction = 'generation', PLAN_AND_GENERATE
+                        stage('generating','直接生成整篇概括主题与首批双语问答')
+                for attempt in range(2):
+                    try:
+                        result = call_cached(kind, instruction, payload, plan_group)
+                        if kind=='generation' and (not isinstance(result.get('pairs'),list) or not isinstance(result.get('skipped'),list)):
+                            raise ValueError('整篇主题与首批问答须返回同一个完整JSON对象。')
+                        selection = TopicSelection(catalog, units)
+                        selection.add(result, topic_units)
+                        selected, terms = selection.select()
+                        redirects = result.get('legacy_topic_map',{})
+                        if not isinstance(redirects,dict):
+                            raise ValueError('整篇分类的历史来源映射格式无效。')
+                        names = {t['name'] for t in selected}
+                        by_id = {t.get('id'):t['name'] for t in selected if t.get('id')}
+                        for old in legacy:
+                            if old['id'] in by_id:
+                                redirects.setdefault(old['id'],by_id[old['id']])
+                            if redirects.get(old['id']) not in names:
+                                raise ValueError('整篇分类须自动映射全部历史来源标签。')
+                        store.apply_topic_selection(doc['id'], selected, terms, result['summary'],task['id'],self.name,
+                                                    redirects=redirects)
+                        if kind=='generation':
+                            initial_generation = {'group_ids':first_ids,'result':result,'target':payload['target']}
+                        break
+                    except ValueError as error:
+                        if isinstance(error,ProviderError) or attempt:
+                            raise
+                        store.event(doc['id'],'topic_plan_regenerated',{'run_id':run_id,'reason':str(error)})
+                        payload = dict(payload, automatic_regeneration='直接重新生成一份完整合法的1至5个概括主题及历史来源映射；不要列更多主题供挑选。',
+                                       validation_feedback=str(error))
             doc = store.document(doc['id'])
+            if force_reclassification and doc['candidates']:
+                save_timing()
+                store.update_document(doc['id'],status='waiting_review',progress=f'系统已自动归纳为{len(doc["topics"])}个整篇正式主题',
+                                      seconds=round(time.perf_counter()-started,2))
+                with store.connect() as db:
+                    finish_review(db,doc['id'])
+                store.task_update(task['id'],self.name,'topic_reclassified','succeeded')
+                return
             existing = [c['row']['input'] for c in doc['candidates'] if c['status']!='rejected']
             # A failed review is resumed before any more generation, including at the target.
             unreviewed_keys = {c.get('pair_id') or c['id'] for c in doc['candidates']
@@ -660,30 +787,55 @@ class Worker:
                 if pending:
                     questions = {v['qa']['input'] for c in pending for v in c['versions']}
                     review_candidates(pending, group, [q for q in existing if q not in questions])
-            count = store.document(doc['id'])['bilingual_count']
+            current = store.document(doc['id'])
+            count = current['bilingual_count']
+            counts = modality_counts(current['candidates'])
             batch_size = max(1,min(3,int(config.get('generation_batch_size',3))))
+            visual_attempts = set()
+            visual_unavailable = False
             def generate_batches():
-                nonlocal count, existing
-                stage('generating', f'已准备 {count}/{config["target_per_document"]} 组双语草稿')
-                for group in generation_groups:
+                nonlocal count, counts, existing, initial_generation, visual_unavailable
+                stage('generating', f'已准备 {count} 组双语草稿；文字约3–5组、图片0–2组')
+                scheduled = ((mode, goal, fill, group)
+                             for mode, goal, fill, groups in generation_phases(text_groups,visual_groups,limits)
+                             for group in groups)
+                for mode, goal, fill, group in scheduled:
                     group_ids = {u['id'] for u in group}
+                    original_group_ids = set(group_ids)
                     active_topics = [t for t in doc['topics'] if set(t['unit_ids']) & group_ids]
                     if not active_topics:
                         continue
                     eligible_ids = {unit_id for t in active_topics for unit_id in t['unit_ids']}
                     group = [u for u in group if u['id'] in eligible_ids]
                     group_ids = {u['id'] for u in group}
+                    if mode=='visual' and (visual_unavailable or len(visual_attempts)>=2 or frozenset(original_group_ids) in visual_attempts):
+                        continue
                     # Two short requests may cover this evidence group; then move to other pages.
-                    for _ in range(2):
-                        remaining = config['target_per_document']-count
+                    for _ in range(1 if mode=='visual' else 2):
+                        remaining = min(goal-counts[mode], limits['maximum']-sum(counts.values()))
+                        if fill:
+                            remaining = min(remaining, limits['target']-sum(counts.values()))
                         if remaining<=0:
                             break
                         target = min(remaining,batch_size)
                         payload = {'units':compact_units(group), 'topics':[{'name':t['name'],'unit_ids':[u for u in t['unit_ids'] if u in group_ids]} for t in active_topics],
-                                   'target':target, 'existing_questions':existing}
+                                   'target':target, 'evidence_mode':mode, 'existing_questions':existing}
+                        if mode=='visual':
+                            visual_attempts.add(frozenset(original_group_ids))
                         try:
-                            result = call_cached('generation', GENERATE, payload, group)
+                            if initial_generation is not None and original_group_ids==initial_generation['group_ids']:
+                                result = initial_generation['result']
+                                initial_generation = None
+                            else:
+                                result = call_cached('generation', GENERATE, payload, group)
                         except ProviderError as error:
+                            if mode=='visual' and text_groups and error.code in {'json','length','context'}:
+                                # Visual coverage is optional. Do not repeat failing image
+                                # requests across the document when text can fill the target.
+                                visual_unavailable = True
+                                store.event(doc['id'],'optional_visual_unavailable',
+                                            {'run_id':run_id,'reason':error.code,'action':'text_fallback'})
+                                break
                             if error.code not in {'length','json'} or target==1:
                                 raise
                             store.event(doc['id'], 'smaller_batch_retry', {'run_id':run_id,'reason':error.code,'target':1})
@@ -726,12 +878,11 @@ class Worker:
                             generated.append({'candidate_id':pair_id,'unit_id':unit['id'],'versions':versions})
                             existing.extend(row['input'] for row in rows)
                             count += 1
+                            counts[mode] += 1
                         if not generated:
                             break
                         review_candidates(generated,group,previous_questions)
-                        stage('generating', f'已准备 {count}/{config["target_per_document"]} 组双语问答')
-                    if count>=config['target_per_document']:
-                        break
+                        stage('generating', f'已准备 {count} 组双语问答：文字 {counts["text"]} 组、图片 {counts["visual"]} 组')
             # Keep normal generation first; only failed groups enter the repair path.
             # At most one replacement pass follows; evidence limits still take priority.
             for delivery_pass in range(2):
@@ -743,15 +894,15 @@ class Worker:
                     if defer_quality():
                         return
                     repair_candidates(failed_keys, units)
-                count, existing = ready_state()
-                if count>=config['target_per_document'] or not failed_keys:
+                count, existing, counts = ready_state()
+                if count>=limits['target'] or not failed_keys:
                     break
                 # Failed drafts remain in the uniqueness/audit history; avoid generating them again.
                 with store.connect() as db:
                     existing += [json.loads(r[0])['input'] for r in db.execute(
                         "SELECT row_json FROM candidates WHERE document_id=? AND status='discarded'",(doc['id'],))]
             stage('preflight','校验最终问答的真实证据、审核绑定和入库条件')
-            count, existing = ready_state(validate=True)
+            count, existing, counts = ready_state(validate=True)
             save_timing()
             seconds = round(time.perf_counter()-started,2)
             has_candidates = bool(existing)

@@ -105,7 +105,7 @@ class GLMClient:
                 'max_tokens': max_tokens or self.config['max_output_tokens'], 'stream': False}
         if self.config.get('reasoning_effort'):
             body['reasoning_effort'] = self.config['reasoning_effort']
-        if self.config.get('json_mode') and not visual:
+        if self.config.get('json_mode') and (not visual or self.config.get('vision_json_mode', False)):
             body['response_format'] = {'type':'json_object'}
         try:
             with httpx.Client(timeout=self.config['timeout_seconds'], follow_redirects=False) as client:
@@ -148,15 +148,20 @@ class GLMClient:
         return model_unit_refs(result, {local:original for original,local in refs.items()}), stats
 
 
-ANALYZE = '''返回 {"summary":"简短梗概", "topics":[{"name":"规范宽主题名", "definition":"定义", "new_reason":"如需新增说明现有主题为何无法覆盖", "importance":3, "keywords":["具体检索词"], "unit_ids":["证据unit_id"]}]}。
-无论原文是中文还是英文，正式主题name统一使用中文规范名，definition、new_reason、summary也使用中文；可在中文名称中保留必要的专业缩写。英文术语可另存keywords辅助检索，不作为独立英文正式主题。
-这是分类任务，不做长篇内容分析。summary 不超过100字；一般1个宽主题、最多2个；每主题最多3个关键短检索词，按辨识度和重要性排序；每个文件最终检索词总数不超过10个，跨主题、跨批次累计，不凑数，大小写/多余空白差异不重复列词，保留会改变含义的符号。已存在主题的 definition 和 new_reason 填空字符串。
-整篇文章最终只能保留1至5个正式主题（不是每批5个，全库主题数不限）。选择最能标识核心研究对象、主要问题或主要贡献的稳定宽主题，按重要性降序；不要为凑5个添加标签。
-importance为整数：3=核心研究对象/主要问题，2=有独立知识价值的主要方法或交叉领域，1=次要实质方向；偶然背景、引用文献及泛泛方法词不列为主题。
-优先选 existing_topics 中名称或同义主题。细方向如三角函数、圆锥曲线归数学；风电、潮汐能归海洋能源。
-关键词不逐词创建主题；地区、年份、指标、单次算法不单独建主题。只有确实不可覆盖的新领域才建议新宽主题。
-新主题采用稳定学科/研究领域名称，不把“具体对象+某项性质/方法”直接当作主题名。例如海底沉积物声学特性、水声传播归海洋声学，沉积物组成与分布归海洋地质；具体对象和性质写入keywords。含义相同的方向只保留一个规范宽主题。
-每个主题必须列实际支持的单元。不存在实质知识时 topics 可为空。图像识别语言以原图为准。'''
+FACTS = '''读取当前全部原文/真实图片，仅提取内容要点，不生成、建议或命名正式主题，不返回topics。
+返回 {"summary":"","facts":[{"unit_ids":["实际发送的单元ID"],"focus":"一句简短描述本批核心研究对象和主要问题","keywords":["关键检索词"]}]}。
+同类内容合在1项，只有真正不同领域才分成2项，最多2项；不要逐页或逐单元写摘要。所有单元ID恰好出现一次，不能遗漏后页或扫描图；图片必须实际读取。
+focus通常30至60个中文字，避免超过80字；不转录数值、公式或详细结果。keywords每项最多3个。无实质内容的单元也列出ID，focus填“无实质知识内容”。这是用于整篇归类的短内容描述，不是正式主题或QA证据。'''
+
+ANALYZE = '''这是一次整篇文件的正式主题生成，不是对一堆主题候选做筛选。
+返回 {"summary":"整篇简短梗概","topics":[{"name":"中文规范宽主题名","definition":"稳定领域定义","new_reason":"新增领域相对已有分类的独立价值","importance":3,"keywords":["关键检索词"],"unit_ids":["支持该领域的证据ID"]}],"legacy_topic_map":{"旧主题ID":"本次中文正式主题名"}}。
+根据给定全文原始证据或全部document_facts，直接概括为1至5个稳定、概括性强的中文正式主题；通常1至2个足够，不凑满5个。绝不逐页/逐方法列正式主题，不生成超过5个后再删选。
+从整篇主要研究对象和主要科学问题归纳，不能把每台仪器、指标、单个算法、地域或研究步骤各建一个正式主题。海洋环流、CO2通量、营养盐、CTD处理等具体方向保留为检索词；用海洋观测、海洋生态、海洋化学等可覆盖整类研究的稳定主题概括，且不能把无关领域硬并。
+existing_topics只是可复用的目录。仅复用范围合适的中文宽主题，目录中的过细旧名不能照抄；新宽主题必须给出definition和new_reason（提示中的示例名不表示已经存在）。已有规范主题这两项可为空。
+summary、name、definition及new_reason统一中文，可保留必要专业缩写。summary不超过80字，definition和new_reason各尽量30字内，不写长篇分析。每主题关键词最多3个，整篇有效检索词合计最多10个，不凑数；英文术语只作检索词。
+importance为1至3的整数，3为主要研究对象/问题。每主题unit_ids必须是真实给定证据支持，不为宽分类扩大问答事实范围；分类须考虑全部内容而不是只看开头。
+若给定legacy_topics，自动将每个旧ID映射到本次某个正式主题，填完整legacy_topic_map；只是历史来源映射，不再输出旧标签为正式主题。该旧主题关联的真实问答单元须纳入对应宽主题的支持范围，原问答内容不在此任务改写。
+只输出合法JSON，不输出供人工选择的候选主题清单。没有实质知识时topics可为空，不以“其他”补数。'''
 
 GENERATE = '''返回 {"pairs":[{"unit_id":"一个合法单元ID", "topic":"一个给定宽主题名称", "zh":{"input":"中文问题", "thinking":"中文简短依据摘要", "output":"中文答案"}, "en":{"input":"English question", "thinking":"Brief evidence summary in English", "output":"English answer"}}], "skipped":["原因"]}。
 严格输出合法JSON：所有字符串中的双引号须转义；公式优先用Unicode文本，反斜杠须按JSON转义；不使用尾逗号、不输出注释。
@@ -166,14 +171,21 @@ pairs 数量不超过 target，target 按知识点/双语组计，不按语言�
 input 写清对象与范围；thinking 各用一句简短依据摘要，中文尽量40字内、英文25词内；output 优先用1—2句直接回答，保留必要限定、单位与不确定性，不重复问题和背景，中文不超过200字、英文不超过140词。skipped 最多3项短理由。
 生成前按审核标准自查：问题直接写对象名称，避免“该研究/本文/In this study”等依赖上下文的开头；问题背景中的地点、日期和条件也必须来自所选单元，证据没有的限定不要添加。不要把概括题再拆成同一考点的最高/最低/趋势题。
 不输出文件路径和来源编号，由程序组装。不得一条答案综合多个单元。不要重复 existing_questions 的考点。
-一个主题可以多个不同知识点，不要求每主题达到目标。不论证据原语言，均须给出中英版本；图片题必须对照实际图片。'''
+一个主题可以多个不同知识点，不要求每主题达到目标。不论证据原语言，均须给出中英版本；图片题必须对照实际图片。
+evidence_mode=text时只按给定文字出题；evidence_mode=visual时必须读取真实图像，针对图表、地图、结构图、照片等视觉信息提出有领域价值的问题，不能把整页正文截图里的文字题充当图片题。纯正文扫描、空白、不可辨认或与已有考点重复时返回skipped，不凑图片数量。全篇文字约3至5组、图片0至2组、合计5至7组是弹性目标；本次仅生成不超过target的指定类型，不能为凑数重复或补造。'''
+
+PLAN_AND_GENERATE = ANALYZE + '\n' + GENERATE + '''
+本次将整篇主题归纳与原有首批问答生成合在同一个请求，不增加独立分类轮次。
+返回一个合并JSON对象：summary、topics、legacy_topic_map、pairs、skipped。先根据全部document_facts直接生成1至5个中文概括主题，再生成最多target组双语问答。
+问答只依据units中实际提供全文/图片的单元，document_facts只是整篇归类要点，不能用于补充问答事实、数字或背景。不能用未在units中的其他单元生成问答。
+主题支持单元可以引用document_facts的unit_ids中的真实ID，QA的unit_id只能选units。证据不足时pairs为空，仍需给出可靠的整篇主题；不要为了完成target增加细主题。每个thinking只写一句，中文尽量30字内、英文15词内；答案直接回答，通常中文40至100字、英文20至60词即可，必要的条件/单位/公式必须保留，复杂机理可适当写长，不重复问题背景。'''
 
 REPAIR = '''这是针对审核反馈修订一组中英问答的任务，返回与生成任务相同的 pairs/skipped JSON，最多1组。
 repair 包含原双语版本、未通过项目及说明。先解决全部反馈，再给出完整等义的中英文版本。
 只能使用当前提供的同一个 unit 和同一个 topic，不能拼接其他页段、改动证据、补造日期/公式/条件。
 指代不清则直接写明原证据中的对象；不支持的背景限定应删除或改问证据可支持的内容；翻译问题同时校正两版。
 若考点重复，选择本单元另一个有独立价值且不重复 existing_questions 的考点；找不到就返回空 pairs 并说明 skipped。
-不要为通过审核降低事实要求或仅把说明改为通过。所有修订将重新接受独立审核。'''
+不要为通过审核降低事实要求或仅把说明改为通过。图片证据须保持真正图表/地图等视觉考点，不能把正文截图中的纯文字题改写成图片题。所有修订将重新接受独立审核。'''
 
 REVIEW = '''返回 {"checks":[{"candidate_id":"原审核组ID", "supported":true, "independent":true, "scope_correct":true, "knowledge_value":true, "distinct":true, "topic_correct":true, "language_correct":true, "translation_consistent":true, "note":"对应原文/图像的具体核查说明"}]}。
 每个 candidates 元素是一个审核组，versions 包含同一知识点的中英两条六字段记录；历史单语组只有一个版本。按组返回一个共同结论，两种语言均逐条对照同一原证据，任一版本有问题即相应检查为 false。
@@ -186,4 +198,5 @@ translation_consistent 检查两个版本的问题、依据和答案含义一致
 “这些/该研究/上图”未明确对象的题须判 independent=false；只考坐标轴单位和刻度、不教会领域知识的题判 knowledge_value=false。
 按整道问题的实际语义判断对象是否明确，不因出现“该研究/this study”等词就自动判失败；若同题已明确研究对象、方法和所问内容，仍可独立理解。
 同一组数值分别罗列、问最高、问最低时审查是否重复考点，优先保留最有意义的题；不为达到数量把所有题判为不同。
+带image的问答须真正解读图表、地图、结构图或照片等视觉信息；仅从整页截图的正文抄取文字知识时knowledge_value=false，不将其算作图片题。
 检查值为布尔，存在问题填 false，并说明。不要改写题目或用其他证据补答。'''

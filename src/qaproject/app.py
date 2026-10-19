@@ -207,9 +207,10 @@ def create_app(runtime=None, seed=False, workers=True):
             raise HTTPException(400,'导出语言仅支持 zh 或 en；不传则导出全部。')
         store=workspace(mode)
         with store.connect() as db:
-            query='SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id WHERE 1=1'
+            query='''SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id
+                LEFT JOIN document_topic_redirects m ON m.document_id=c.document_id AND m.old_topic_id=c.topic_id WHERE 1=1'''
             args=[]
-            if topic_id: query+=' AND c.topic_id=?';args.append(topic_id)
+            if topic_id: query+=' AND COALESCE(m.topic_id,c.topic_id)=?';args.append(topic_id)
             if document_id: query+=' AND c.document_id=?';args.append(document_id)
             if language: query+=" AND json_extract(q.row_json,'$.language')=?";args.append(language)
             rows=[json.loads(r[0]) for r in db.execute(query+' ORDER BY q.created',args)]
