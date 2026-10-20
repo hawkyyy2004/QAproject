@@ -9,6 +9,16 @@ MAX_DOCUMENT_TOPICS = 5
 MAX_DOCUMENT_SEARCH_TERMS = 10
 
 
+def image_media_type(path):
+    """Media types for registered visual assets, including frozen historical PNGs."""
+    suffix = Path(path).suffix.lower()
+    if suffix in {'.jpg', '.jpeg'}:
+        return 'image/jpeg'
+    if suffix == '.png':
+        return 'image/png'
+    raise ValueError('图片资产格式不受支持。')
+
+
 def settings():
     return json.loads((ROOT / 'config/settings.json').read_text(encoding='utf-8'))
 

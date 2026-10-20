@@ -6,14 +6,14 @@ from pathlib import Path
 import secrets
 import time
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .demo import seed_demo
 from .pipeline import Worker, approve, approve_document, reject
-from .settings import ROOT, FIELDS, settings, api_key, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
+from .settings import ROOT, FIELDS, settings, api_key, image_media_type, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
 from .store import Store, uid
 from .semantic import SemanticSearch, SearchCoordinator
 
@@ -21,6 +21,20 @@ from .semantic import SemanticSearch, SearchCoordinator
 class CommitBody(BaseModel):
     reviewed: bool
     expected_hash: str
+
+
+class EditVersion(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str
+    expected_hash: str
+    input: str = Field(min_length=1, max_length=20000)
+    thinking: str = Field(min_length=1, max_length=20000)
+    output: str = Field(min_length=1, max_length=20000)
+
+
+class EditBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    versions: list[EditVersion] = Field(min_length=1, max_length=2)
 
 
 def create_app(runtime=None, seed=False, workers=True):
@@ -131,7 +145,7 @@ def create_app(runtime=None, seed=False, workers=True):
         path=Path(row['path']).resolve()
         if not path.is_relative_to(store.root/'assets/images') or not path.is_file():
             raise HTTPException(404,'图片存储无效')
-        return FileResponse(path,media_type='image/png')
+        return FileResponse(path,media_type=image_media_type(path))
 
     @app.get('/api/originals/{doc_id}')
     def original(doc_id,mode='live'):
@@ -210,6 +224,28 @@ def create_app(runtime=None, seed=False, workers=True):
             db.execute("UPDATE documents SET status='queued',progress='等待修订未通过的问答并重新审核' WHERE id=?",(doc_id,))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'optimization_requested','{}',time.time()))
         return {'queued':True}
+
+    @app.get('/api/qas')
+    def qa_list(mode='live',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
+        from .qa_summary import list_qas
+        return list_qas(workspace(mode),page,page_size)
+
+    @app.get('/api/qas/{qa_id}')
+    def qa_detail(qa_id,mode='live'):
+        from .qa_summary import edit_detail
+        return edit_detail(workspace(mode),qa_id)
+
+    @app.post('/api/qas/{qa_id}/revisions')
+    def qa_edit(qa_id,body:EditBody,mode='live'):
+        from .qa_summary import queue_revision
+        if mode!='live': raise HTTPException(400,'演示记录不执行正式修改')
+        return queue_revision(workspace(mode),qa_id,[v.model_dump() for v in body.versions])
+
+    @app.post('/api/qas/{qa_id}/retry')
+    def qa_edit_retry(qa_id,mode='live'):
+        from .qa_summary import retry_revision
+        if mode!='live': raise HTTPException(400,'演示记录不执行正式修改')
+        return retry_revision(workspace(mode),qa_id)
 
     @app.get('/api/export')
     def export(mode='live',topic_id=None,document_id=None):

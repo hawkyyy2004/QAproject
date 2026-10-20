@@ -334,7 +334,7 @@ class Worker:
             provider_config = {k:config.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')}
             request = {'kind':kind, 'prompt':instruction, 'payload':payload,
                        'units':group, 'config':provider_config,
-                       'review_attempt':task['id'] if kind=='review' and task.get('review_candidate_id') else None}
+                       'review_attempt':task['id'] if kind=='review' and (task.get('review_candidate_id') or task.get('revision_id')) else None}
             # A complete response remains valid when only the output allowance changes.
             signature = digest(request)
             file = store.root / 'runs' / (signature+'.json')
@@ -660,6 +660,12 @@ class Worker:
                 db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc['id'],'quality_deferred',
                            encode({'run_id':run_id,'timings':timings,'seconds':round(time.perf_counter()-started,2)}),time.time()))
             return True
+
+        if task.get('revision_id'):
+            from .qa_summary import process_revision
+            current_stage = 'qa_revision_review'
+            process_revision(store,task,self.name,call_cached)
+            return
 
         try:
             if task.get('review_candidate_id'):

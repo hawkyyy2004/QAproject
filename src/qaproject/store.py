@@ -128,6 +128,12 @@ class Store:
               attempts INTEGER DEFAULT 0, stage TEXT DEFAULT 'queued');
             CREATE TABLE IF NOT EXISTS events(
               id TEXT PRIMARY KEY, document_id TEXT, kind TEXT, detail TEXT, created REAL);
+            CREATE TABLE IF NOT EXISTS qa_revisions(
+              id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
+              before_json TEXT NOT NULL, after_json TEXT NOT NULL, status TEXT NOT NULL,
+              note TEXT, review TEXT, created REAL, updated REAL, task_id TEXT);
+            CREATE INDEX IF NOT EXISTS qa_revision_documents ON qa_revisions(document_id,created DESC,id DESC);
+            CREATE INDEX IF NOT EXISTS qas_created ON qas(created DESC,id DESC);
             CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied REAL);
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);
@@ -138,6 +144,8 @@ class Store:
                 db.execute('PRAGMA user_version=1')
             if 'review_candidate_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
                 db.execute('ALTER TABLE tasks ADD COLUMN review_candidate_id TEXT REFERENCES candidates(id)')
+            if 'revision_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
+                db.execute('ALTER TABLE tasks ADD COLUMN revision_id TEXT REFERENCES qa_revisions(id)')
             if 'repair_attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(qa_pairs)')}:
                 db.execute('ALTER TABLE qa_pairs ADD COLUMN repair_attempts INTEGER NOT NULL DEFAULT 0')
             if 'unit_count' not in {r['name'] for r in db.execute('PRAGMA table_info(documents)')}:
@@ -537,7 +545,7 @@ class Store:
             db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
             row = db.execute("SELECT * FROM tasks WHERE status='queued'"+
                              (' AND document_id=?' if document_id else '')+
-                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL THEN 2 WHEN stage='topic_reclassification' THEN 1 ELSE 0 END,rowid LIMIT 1",
+                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL OR revision_id IS NOT NULL THEN 2 WHEN stage='topic_reclassification' THEN 1 ELSE 0 END,rowid LIMIT 1",
                              (document_id,) if document_id else ()).fetchone()
             if not row:
                 return None

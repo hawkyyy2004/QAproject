@@ -179,14 +179,35 @@ def extract(store, doc, config, progress=None):
                     progress(n, len(pdf))
             pages = len(pdf)
     elif suffix in {'.png', '.jpg', '.jpeg', '.webp'}:
-        with pymupdf.open(path) as image_doc:
-            page = image_doc[0]
-            if page.rect.width * page.rect.height > 40_000_000:
-                raise ValueError('图片像素过大，初版拒绝自动缩小而丢失细节。')
-            out = folder / 'image-0001.png'
-            page.get_pixmap(alpha=False).save(out)
-        asset = store.add_asset(doc['id'], out, 0, '原始图像的 PNG 副本')
-        add('Image evidence. Determine language from the actual image.', 0, 1, str(out), asset, 'image-0001')
+        raw = path.read_bytes()
+        expected = {'.png':'png', '.jpg':'jpeg', '.jpeg':'jpeg', '.webp':'webp'}[suffix]
+        matches = {'png':raw.startswith(b'\x89PNG\r\n\x1a\n'), 'jpeg':raw.startswith(b'\xff\xd8\xff'),
+                   'webp':raw.startswith(b'RIFF') and raw[8:12]==b'WEBP'}
+        if not matches[expected]:
+            raise ValueError('图片内容与扩展名不符，或图片已损坏。')
+        if expected in {'png', 'jpeg'} and len(raw) > 5*1024*1024:
+            raise ValueError('原图超过 5MB 视觉输入限额，未压缩或生成视觉 QA。')
+        try:
+            # Read native image dimensions, not DPI-dependent page dimensions.
+            # image_profile is broken for byte streams in bundled PyMuPDF 1.26.5.
+            with pymupdf.open(stream=raw, filetype=expected) as image_doc:
+                profile = image_doc[0].get_image_info()[0]
+        except (RuntimeError, ValueError, IndexError, pymupdf.mupdf.FzErrorBase) as error:
+            raise ValueError('图片无法读取，请提供完整有效的 PNG/JPG/WebP 文件。') from error
+        if profile['width'] * profile['height'] > 40_000_000:
+            raise ValueError('图片像素过大，未自动缩小或裁剪。')
+        if expected in {'png', 'jpeg'}:
+            # Preserve resolution, transparency, color and EXIF; no page rendering.
+            out = folder / ('image-0001.png' if expected == 'png' else 'image-0001.jpg')
+            out.write_bytes(raw)
+        else:
+            # Retain the existing WebP compatibility path; its original is also kept.
+            with pymupdf.open(path) as image_doc:
+                out = folder / 'image-0001.png'
+                image_doc[0].get_pixmap(alpha=False).save(out)
+        asset = store.add_asset(doc['id'], out, 0, '完整原始图片' if expected != 'webp' else '完整图片的 PNG 兼容副本')
+        add('Image evidence. Determine language from the actual image.', 0, 1, str(out), asset, 'image-0001',
+            evidence_kind='standalone_image', width=profile['width'], height=profile['height'])
         pages = 0
     elif suffix in {'.txt', '.md'}:
         text = path.read_text(encoding='utf-8-sig')

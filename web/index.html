@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>QAproject · 语料工作台</title>
-  <link rel="stylesheet" href="/style.css?v=20261016-full-images">
+  <link rel="stylesheet" href="/style.css?v=20261020-qa-summary-compact">
 </head>
 <body>
   <aside class="sidebar">
     <a class="brand" href="#files"><span class="brand-mark">Q<span>↗</span></span><span>QAproject<small>语料处理工作台</small></span></a>
     <div class="nav-caption">工作空间</div>
-    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button></nav>
+    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button></nav>
     <div class="sidebar-note"><div class="tiny-orbit">✦</div><strong>宽主题，细检索</strong><p>用稳定主题归类，用具体关键词找到每一份资料。</p><div class="note-line"></div><span>GLM 驱动 · 来源可追溯</span></div>
   </aside>
   <div class="workspace">
@@ -20,7 +20,7 @@
         <div class="stats" id="stats"></div>
         <section class="upload-card" id="drop-zone">
           <div class="upload-visual"><div class="paper paper-back"></div><div class="paper paper-front"><span data-icon="upload"></span><i></i><i></i></div><span class="plus-bubble">+</span></div>
-          <div class="upload-copy"><div class="upload-title">文件解析</div><p>拖拽文件到此处，或选择本机资料。支持 PDF、图片、CSV 和文本。</p><div class="upload-hints"><span>✦ 图文一起读</span><span>◈ 优先归入已有主题</span><span>✓ 中英双语 QA</span></div></div>
+          <div class="upload-copy"><div class="upload-title">文件解析</div><p>拖拽文件到此处，或选择本机资料。支持 PDF、PNG/JPG 图片、CSV 和文本；图片可直接生成主题与双语 QA。</p><div class="upload-hints"><span>✦ 图文一起读</span><span>◈ 优先归入已有主题</span><span>✓ 中英双语 QA</span></div></div>
           <div class="upload-action"><button class="button primary" id="choose-files"><span data-icon="plus"></span>选择文件</button><span id="upload-limit">每份最多 25 MB · PDF 页数不限</span></div>
           <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.csv" multiple hidden>
         </section>
@@ -31,12 +31,19 @@
         <section class="search-hero"><div class="search-symbol" data-icon="search"></div><h2>从一个词，找到相关资料</h2><p>精准匹配优先，相关主题为你补充推荐。也支持搜索别名和具体关键词。</p><div class="search-input-wrap"><span data-icon="search"></span><input id="theme-query" placeholder="输入主题名称、简称或具体关键词" aria-label="搜索主题"><button id="search-button" class="button primary">搜索</button></div><div class="suggestions" id="search-suggestions" hidden></div></section>
         <div class="search-summary"><h2 id="search-summary">主题与涵盖文件</h2><span>主题归类与细分方向分别保存</span></div><div id="search-results"></div><section id="semantic-section" class="semantic-section" hidden aria-live="polite"><div class="semantic-heading"><h2>您可能想搜</h2><span>相似主题 · 最多 5 个</span></div><p id="semantic-status"></p><div id="semantic-results"></div></section>
       </section>
-      <footer class="main-footer"><span>QAproject <b>·</b> 公司 GLM 接口</span><span>文件处理 / 主题模糊搜索</span></footer>
+      <section id="qas-view" hidden>
+        <section class="table-card qa-summary-card">
+          <div class="section-toolbar"><div><h2>已入库问答 <span id="qa-total">0</span></h2><p>最新入库在最上方 · 修改通过审核后生效</p></div><div class="toolbar-actions"><button class="button secondary" id="qa-refresh">刷新</button><button class="button primary" id="qa-export"><span data-icon="download"></span>导出文件</button></div></div>
+          <div class="table-scroll" tabindex="0" aria-label="QA 六字段表格，可横向滚动"><table class="qa-summary-table"><thead><tr><th>input · 问题</th><th>thinking · 依据摘要</th><th>output · 答案</th><th>source · 来源</th><th>image · 图片</th><th>language</th><th>操作</th></tr></thead><tbody id="qa-rows"></tbody></table></div><div id="qa-empty" class="empty-state" hidden><strong>还没有已入库的问答</strong>在文件处理中完成审核并入库后，问答会显示在这里。</div>
+          <div class="table-footer qa-pagination"><span id="qa-page-info" role="status">正在读取已入库问答</span><div><button class="button ghost" id="qa-prev">上一页</button><button class="button ghost" id="qa-next">下一页</button></div></div>
+        </section>
+      </section>
     </main>
   </div>
   <div id="drawer-overlay" class="drawer-overlay" hidden><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><span class="eyebrow">DOCUMENT DETAIL</span><h2 id="drawer-title"></h2></div><button id="close-drawer" class="icon-button" aria-label="关闭详情">×</button></div><div id="drawer-body" class="drawer-body"></div></aside></div>
+  <dialog id="qa-editor" class="qa-editor" aria-labelledby="qa-editor-title"><div class="drawer-head"><div><span class="eyebrow">QA EDITOR</span><h2 id="qa-editor-title">编辑问答</h2></div><button id="qa-editor-close" class="icon-button" aria-label="关闭编辑">×</button></div><form id="qa-edit-form"><div id="qa-editor-body" class="drawer-body"></div><div class="qa-editor-footer"><span id="qa-edit-status" role="status"></span><div><button type="button" class="button secondary" id="qa-edit-cancel">关闭</button><button type="submit" class="button primary" id="qa-edit-save">保存并审核</button></div></div></form></dialog>
   <div id="connection-popover" class="connection-popover" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/app.js?v=20261019-document-commit"></script>
+  <script src="/app.js?v=20261020-qa-summary-compact"></script>
 </body>
 </html>
