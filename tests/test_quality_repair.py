@@ -65,7 +65,7 @@ def test_all_healthy_generation_precedes_any_repairs(setup_pipeline):
     assert doc['bilingual_count']==5 and all(c['status']=='pending' for c in doc['candidates']),doc['error']
     kinds=[(k,'repair' in p) for k,p,_ in calls]
     first_repair=kinds.index(('generation',True))
-    assert kinds[:first_repair]==[('analysis',False),('generation',False),('review',False),('generation',False),('review',False)]
+    assert kinds[:first_repair]==[('analysis',False),('generation',False),('review',False),('review',False),('generation',False),('review',False),('review',False)]
 
 
 def test_repair_stays_on_one_unit_and_rejects_broader_evidence(setup_pipeline):
@@ -109,7 +109,7 @@ def test_crash_after_revision_resumes_review_without_regenerating(setup_pipeline
     worker.process(store.claim(worker.name,document_id=doc_id))
     doc=store.document(doc_id)
     assert doc['status']=='waiting_review' and all(c['status']=='pending' for c in doc['candidates']),doc['error']
-    assert [k for k,_,_ in calls]==['review']
+    assert [k for k,_,_ in calls]==['review','review']
     assert ids=={c['id']:c['row_hash'] for c in doc['candidates']}
     assert len(history(store,'pair_revision'))==1
 

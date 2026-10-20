@@ -63,7 +63,7 @@ def test_five_knowledge_points_are_ten_rows_with_same_number_of_calls(setup_pipe
     doc=run(setup_pipeline)
     assert doc['status']=='waiting_review' and doc['bilingual_count']==5
     assert len(doc['candidates'])==10 and doc['qa_count']==doc['qa_pair_count']==0
-    assert [k for k,_,_ in calls]==['analysis','generation','review','generation','review']
+    assert [k for k,_,_ in calls]==['analysis','generation','review','review','generation','review','review']
     assert [p['target'] for k,p,_ in calls if k=='generation']==[3,2]
     for pair_id in {c['pair_id'] for c in doc['candidates']}:
         versions=[c for c in doc['candidates'] if c['pair_id']==pair_id]
@@ -160,7 +160,7 @@ def test_pair_rereview_uses_only_its_evidence_and_never_regenerates(setup_pipeli
     assert client.post(url,headers=headers,json=body).status_code==400
     calls.clear()
     worker.process(store.claim(worker.name,document_id=doc_id))
-    assert [k for k,_,_ in calls]==['review']
+    assert [k for k,_,_ in calls]==['review','review']
     assert len(calls[0][1]['candidates'])==1 and len(calls[0][1]['candidates'][0]['versions'])==2
     assert len(calls[0][2])==1
     assert len(store.document(doc_id)['candidates'])==10
@@ -287,7 +287,7 @@ def test_explicit_rereview_gets_fresh_decision_and_keeps_previous_review(setup_p
         assert client.post('/api/candidates/'+target['id']+'/rereview',headers=headers,
                            json={'reviewed':False,'expected_hash':target['row_hash']}).status_code==200
         worker.process(store.claim(worker.name,document_id=doc_id))
-        assert [k for k,_,_ in calls]==['review']
+    assert [k for k,_,_ in calls]==['review','review']
     latest=store.document(doc_id)
     assert all(c['status']=='pending' for c in latest['candidates'])
     with store.connect() as db:

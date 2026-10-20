@@ -128,5 +128,5 @@ def test_failed_review_resumes_at_five_without_repeating_generation(tmp_path, mo
     assert completed['status']=='waiting_review'
     assert len(completed['candidates'])==10 and completed['qa_count']==0 and completed['bilingual_count']==5
     assert all(c['review'] and c['status']=='pending' for c in completed['candidates'])
-    assert calls=={'analysis':1,'generation':2,'review':3}
+    assert calls=={'analysis':1,'generation':2,'review':5}
     assert set(completed['timings'])=={'parsing','analyzing','generating','reviewing','preflight'}

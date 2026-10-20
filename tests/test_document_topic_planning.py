@@ -44,8 +44,8 @@ def test_multibatch_whole_file_topics_share_first_generation_and_keep_call_count
     doc=store.document(doc_id)
     assert doc['status']=='waiting_review' and doc['bilingual_count']==5,doc['error']
     assert len(doc['topics'])==1 and all(c['status']=='pending' for c in doc['candidates'])
-    assert len(calls)==5+4 and calls.count('combined')==1
-    assert calls.count('generation')==1 and calls.count('review')==2
+    assert len(calls)==5+6 and calls.count('combined')==1
+    assert calls.count('generation')==1 and calls.count('review')==4
     for c in doc['candidates']:
         approve(store,c['id'],True,c['row_hash'])
     assert store.document(doc_id)['qa_count']==10

@@ -121,7 +121,7 @@ def create_app(runtime=None, seed=False, workers=True):
     async def imports(request:Request,mode='live'):
         store=workspace(mode)
         # Multipart data is streamed by Starlette into a temporary spool, then bounded per file.
-        form=await request.form(max_files=20,max_fields=5)
+        form=await request.form(max_files=50,max_fields=5)
         files=[value for _,value in form.multi_items() if hasattr(value,'read') and hasattr(value,'filename')]
         if not files: raise HTTPException(400,'请选择文件')
         limit=settings()['max_file_mb']*1024*1024

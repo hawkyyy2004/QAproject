@@ -116,5 +116,40 @@ def main():
     return 0
 
 
+def encode_only():
+    """Encode request texts in this child and write vectors back to the job file.
+
+    Reuses the vectors cache; never imports onnx in the web/PDF process.
+    """
+    job_path = Path(sys.argv[1])
+    job = json.loads(job_path.read_text(encoding='utf-8'))
+    texts = job['texts']
+    hashes = [digest([job['model_id'], text]) for text in texts]
+    result = {}
+    missing = []
+    with cache_connection(job['cache']) as db:
+        for text, h in zip(texts, hashes):
+            row = db.execute('SELECT vector FROM vectors WHERE hash=?', (h,)).fetchone()
+            if row and len(row['vector']) == 512 * 4:
+                result[h] = row['vector'].hex()
+            else:
+                missing.append((text, h))
+    if missing:
+        encoder = LocalEmbedder(job['model_dir'])
+        vectors = {}
+        for start in range(0, len(missing), 2):
+            batch = missing[start:start+2]
+            encoded = encoder.encode([text for text, _ in batch])
+            with cache_connection(job['cache']) as db:
+                for (text, h), vector in zip(batch, encoded):
+                    db.execute('INSERT OR REPLACE INTO vectors VALUES(?,?)', (h, vector.astype('<f4').tobytes()))
+                    vectors[h] = vector
+        del encoder
+        result.update({h: v.astype('<f4').tobytes().hex() for h, v in vectors.items()})
+    job_path.write_text(json.dumps({'vectors': result}, ensure_ascii=False), encoding='utf-8')
+
+
 if __name__ == '__main__':
+    if len(sys.argv) > 2 and sys.argv[2] == 'encode-only':
+        raise SystemExit(encode_only())
     raise SystemExit(main())

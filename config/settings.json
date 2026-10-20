@@ -26,5 +26,7 @@
     "model_dir": "runtime/models/bge-small-zh-v1.5",
     "model_id": "bge-small-zh-v1.5-onnx-int8-cls-v1",
     "min_similarity": 0.65
+    ,"cross_document_dedup": true
+    ,"dedup_threshold": 0.93
   }
 }

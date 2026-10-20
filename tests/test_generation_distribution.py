@@ -99,7 +99,7 @@ def test_35_units_produce_three_text_two_visual_in_same_five_calls(mixed):
     before = digest(units)
     doc = process(store,doc_id)
     assert modality_counts(doc['candidates'])==dict(text=3,visual=2)
-    assert [k for k,_,_ in calls]==['analysis','generation','review','generation','review']
+    assert [k for k,_,_ in calls]==['analysis','generation','review','review','generation','review','review']
     assert [(p['evidence_mode'],p['target']) for k,p,_ in calls if k=='generation']==[('text',3),('visual',2)]
     assert digest(doc['units'])==before
     assert doc['bilingual_count']==5 and len(doc['candidates'])==10
@@ -129,7 +129,7 @@ def test_existing_five_text_pairs_leave_room_for_two_visual_without_rewriting(mi
     enqueue(store,doc_id)
     doc = process(store,doc_id)
     assert modality_counts(doc['candidates'])==dict(text=5,visual=2)
-    assert [k for k,_,_ in calls]==['generation','review']
+    assert [k for k,_,_ in calls]==['generation','review','review']
     assert all(before[c['id']]==(c['row_hash'],c['evidence_hash'],c['review']) for c in doc['candidates'] if c['id'] in before)
     enqueue(store,doc_id)
     calls.clear()
@@ -150,7 +150,7 @@ def test_resume_after_image_timeout_keeps_three_text_pairs_and_sends_images(mixe
     doc=process(store,doc_id)
     assert modality_counts(doc['candidates'])==dict(text=3,visual=2)
     assert all(c['row_hash']==old[c['id']] for c in doc['candidates'] if c['id'] in old)
-    assert [k for k,_,_ in calls]==['generation','review']
+    assert [k for k,_,_ in calls]==['generation','review','review']
 
 
 def test_default_limits_and_explicit_small_validation_target():

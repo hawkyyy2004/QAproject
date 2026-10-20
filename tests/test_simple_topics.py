@@ -58,7 +58,7 @@ def test_independent_categories_reuse_across_files_without_extra_requests(tmp_pa
             assert c['unit_id'] in {sample[0][i]['id'] for i in sample[1][name]}
             approve(store,c['id'],True,c['row_hash'])
         docs.append(doc_id)
-    assert calls==['analysis','generation','review','generation','review']*2
+    assert calls==['analysis','generation','review','review','generation','review','review']*2
     assert {d['id'] for d in store.search('电池')[0]['documents']}==set(docs)
     assert {d['id'] for d in store.search('电化学')[0]['documents']}==set(docs)
     assert {d['id'] for d in store.search('聚合物')[0]['documents']}=={docs[0]}

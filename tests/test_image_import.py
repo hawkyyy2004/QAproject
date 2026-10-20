@@ -69,7 +69,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
-    assert seen==['analysis','generation','review'],doc['error']
+    assert seen==['analysis','generation','review','review'],doc['error']
     assert doc['status']=='waiting_review' and doc['bilingual_count']==2
     assert doc['pages']==0 and len(doc['units'])==len(doc['assets'])==1
     unit = doc['units'][0]
@@ -82,7 +82,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     result = client.post('/api/documents/'+doc_id+'/approve',headers=headers)
     assert result.status_code==200,result.text
     assert store.document(doc_id)['qa_count']==4
-    assert seen==['analysis','generation','review']  # Commit adds no model request.
+    assert seen==['analysis','generation','review','review']  # Commit adds no model request.
     for c in doc['candidates']:
         assert c['row']['source']==doc['path']+'|image-0001|海洋观测'
         assert c['row']['image']==unit['image'] and set(c['row'])==set(FIELDS)
@@ -90,7 +90,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     with store.connect() as db:
         db.execute("UPDATE tasks SET status='queued' WHERE document_id=?",(doc_id,))
     worker.process(store.claim(worker.name))
-    assert seen==['analysis','generation','review']
+    assert seen==['analysis','generation','review','review']
     exported = client.get('/api/export?document_id='+doc_id)
     assert exported.status_code==200
     rows = list(csv.DictReader(io.StringIO(exported.content.decode('utf-8-sig'))))

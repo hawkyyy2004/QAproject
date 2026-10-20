@@ -8,9 +8,10 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REPAIR
+from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REVIEW_SKEPTIC, REPAIR
 from .parsers import extract, text_alternatives, model_text, text_view_matches
-from .settings import FIELDS, settings, source_ref
+from .semantic import cross_document_duplicate
+from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection
@@ -265,6 +266,23 @@ def content_facts(result, group):
     return items
 
 
+def response_shape_ok(kind, instruction, result):
+    """Structural gate shared by cache hits and fresh responses.
+
+    A well-formed but structurally invalid response must never be cached or
+    reused; otherwise every retry replays the same broken output forever.
+    """
+    if instruction in (GENERATE,GENERATE+'\n'+REPAIR):
+        if not isinstance(result,dict):
+            return False
+        return isinstance(result.get('pairs'),list) and isinstance(result.get('skipped'),list)
+    if kind=='review':
+        return isinstance(result,dict) and isinstance(result.get('checks'),list)
+    if kind=='topic_plan':
+        return isinstance(result,dict) and isinstance(result.get('topics'),list)
+    return True
+
+
 def bounded_analysis(groups, run, concurrency):
     """Bound requests in flight; consume in source order for deterministic topic merges."""
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -354,6 +372,13 @@ class Worker:
                             continue
                     else:
                         cached_result = json.loads(cached.read_text())['result']
+                        if not response_shape_ok(kind, instruction, cached_result):
+                            # Same poisoning mode as the v05 facts fix: keep the
+                            # rejected cache for diagnosis, never replay it.
+                            cached.replace(cached.with_suffix('.invalid-'+uid()+'.json'))
+                            store.event(doc['id'], 'cache_invalid', {'run_id':run_id, 'stage':kind,
+                                        'signature':cached.stem, 'code':'shape', 'units':len(group)})
+                            continue
                     store.event(doc['id'], 'cache_hit', {'run_id':run_id, 'stage':kind, 'signature':cached.stem})
                     return cached_result
             plan = file.with_suffix('.split.json')
@@ -457,6 +482,8 @@ class Worker:
                 store.task_update(task['id'], self.name, kind)
                 try:
                     result, stats = GLMClient(config).call(instruction, payload, group, max_tokens=token_limit)
+                    if not response_shape_ok(kind, instruction, result):
+                        raise ProviderError('模型输出缺少必需字段，结构无效。', 'json', dict(stats, error_category='shape'))
                     if facts_request:
                         try:
                             content_facts(result, group)
@@ -517,11 +544,48 @@ class Worker:
             checks = result.get('checks', [])
             if not isinstance(checks, list):
                 raise ValueError('审核响应结构无效。')
+            dedup_cfg = None if repairing else (settings().get('semantic_search') or {}).get('cross_document_dedup')
+            duplicates = None
+            if dedup_cfg:
+                dedup = settings().get('semantic_search') or {}
+                spec = json.loads((ROOT/'config/embedding-model.json').read_text())
+                model_id = digest([dedup.get('model_id','bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
+                try:
+                    duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
+                        model_id, store.root/'search.sqlite3', doc['id'],
+                        [v['qa']['input'] for c in candidates for v in c['versions'] if v['qa']['language']=='zh'],
+                        float(dedup.get('dedup_threshold', 0.93)))
+                except Exception:
+                    duplicates = None
+                    store.event(doc['id'], 'cross_dedup_unavailable', {'run_id':run_id})
             for candidate in candidates:
                 returned = next((c for c in checks if isinstance(c,dict) and c.get('candidate_id')==candidate['candidate_id']), {})
                 check = {k:returned.get(k) for k in CHECKS+BILINGUAL_CHECKS+['note']}
                 passed = all(check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS) and isinstance(check.get('note'),str) and bool(check['note'])
+                if passed and not repairing:
+                    # AND of two independent review channels; the skeptic vote
+                    # only runs for first-vote survivors, so the extra cost is bounded.
+                    try:
+                        skeptic = call_cached('review', REVIEW_SKEPTIC, {'candidates':candidates, 'units':compact_units(group),
+                                                    'compare_questions':compare}, group)
+                        skeptic_checks = skeptic.get('checks', []) if isinstance(skeptic,dict) else []
+                        skeptic_returned = next((c for c in skeptic_checks if isinstance(c,dict) and c.get('candidate_id')==candidate['candidate_id']), {})
+                        skeptic_check = {k:skeptic_returned.get(k) for k in CHECKS+BILINGUAL_CHECKS}
+                        if not all(skeptic_check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS):
+                            passed = False
+                            check['skeptic'] = skeptic_check
+                            failed = [k for k,v in skeptic_check.items() if v is not True]
+                            check['note'] = '；'.join([str(check.get('note','')), '怀疑者复核未通过: '+'/'.join(failed)])
+                    except (ProviderError, ValueError, KeyError, TypeError):
+                        # The skeptic channel failing (network/quota) must not veto a
+                        # passed first vote; the first review remains the recorded one.
+                        store.event(doc['id'], 'skeptic_review_unavailable', {'run_id':run_id,'candidate_id':candidate['candidate_id']})
                 flags = list(dict.fromkeys([flag for v in candidate['versions'] for flag in quality_flags(v['qa'])]+review_note_flags(check.get('note',''))))
+                if duplicates:
+                    zh = next((v['qa']['input'] for v in candidate['versions'] if v['qa']['language']=='zh'), None)
+                    similarity = duplicates.get(zh) if zh else None
+                    if similarity is not None:
+                        flags.append(f'与全库其他文档已入库问题高度相似（相似度 {similarity:.2f}），需人工确认是否跨文档重复。')
                 if flags:
                     check['local_flags'] = flags
                     check['note'] = '；'.join([str(check.get('note','')),*flags])

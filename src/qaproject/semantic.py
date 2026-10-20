@@ -250,3 +250,74 @@ class SearchCoordinator:
             except (OSError, sqlite3.Error, ValueError):
                 # Search indexing cannot terminate the PDF worker or expose raw errors.
                 self.stop.wait(3)
+
+
+def encode_texts(model_dir, model_id, cache, texts, timeout=30):
+    """Embeddings for several texts via one encode-only child; None when unavailable.
+
+    Vectors persist in the shared cache, so only unseen texts pay model cost.
+    """
+    if not all((Path(model_dir) / f).is_file() for f in ('model.onnx', 'tokenizer.json')):
+        return None
+    texts = list(dict.fromkeys(t for t in texts if t and t.strip()))
+    if not texts:
+        return {}
+    job_path = Path(cache).parent / 'dedup-job.json'
+    job = {'model_dir': str(model_dir), 'model_id': model_id, 'cache': str(cache), 'texts': texts}
+    job_path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
+    env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
+           'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
+           'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
+    try:
+        done = subprocess.run([sys.executable, '-m', 'qaproject.embedding', str(job_path), 'encode-only'],
+                              env=env, cwd=ROOT, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+        if done.returncode != 0:
+            return None
+        vectors = json.loads(job_path.read_text(encoding='utf-8')).get('vectors', {})
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+    finally:
+        job_path.unlink(missing_ok=True)
+    result = {}
+    for text in texts:
+        raw = vectors.get(digest([model_id, text]))
+        if raw:
+            result[text] = struct.unpack('<512f', bytes.fromhex(raw))
+    return result
+
+
+def cross_document_duplicate(store, model_dir, model_id, cache, document_id, questions, threshold):
+    """Max cosine similarity of zh questions against approved zh questions of other documents.
+
+    Returns {question: max_similarity}; missing entries mean unavailable or no reference.
+    """
+    import numpy as np
+    vectors = encode_texts(model_dir, model_id, cache, questions)
+    if vectors is None:
+        return None
+    with store.connect() as db:
+        rows = db.execute('''SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id
+            WHERE c.status='approved' AND c.document_id!=? AND json_extract(q.row_json,'$.language')='zh' ''',
+            (document_id,)).fetchall()
+    reference = list(dict.fromkeys(json.loads(r['row_json']).get('input','') for r in rows))
+    reference = [q for q in reference if q and q not in questions]
+    result = {}
+    if not reference:
+        return result
+    reference_vectors = encode_texts(model_dir, model_id, cache, reference)
+    if reference_vectors is None:
+        return result
+    reference_vectors = {q: v for q, v in reference_vectors.items() if v is not None}
+    if not reference_vectors:
+        return result
+    matrix = np.stack(list(reference_vectors.values()))
+    for question in questions:
+        vector = vectors.get(question)
+        if vector is None:
+            continue
+        scores = matrix @ np.asarray(vector, dtype='<f4')
+        best = float(scores.max()) if scores.size else 0.0
+        if best >= threshold:
+            result[question] = best
+    return result
