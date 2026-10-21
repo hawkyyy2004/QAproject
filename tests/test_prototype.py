@@ -67,7 +67,7 @@ def test_upload_session_duplicate_and_name_safety(app):
     doc=app.state.stores['live'].document(first['id'])
     assert Path(doc['path']).is_relative_to(app.state.stores['live'].root/'originals')
     assert Path(doc['path']).name=='a.txt'
-    assert 'GLM_API_KEY' not in json.dumps(client.get('/api/bootstrap').json())
+    assert 'API_KEY' not in json.dumps(client.get('/api/bootstrap').json())
 
 
 def fake_provider(request):

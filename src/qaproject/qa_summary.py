@@ -3,6 +3,9 @@ import json
 import time
 
 from .store import digest, encode, normalized, uid
+from .execution import WorkInterrupted
+from .conflicts import EditConflict
+from .source_files import verify_reference
 
 
 def members(db, qa_id):
@@ -43,6 +46,7 @@ def list_qas(store, page=1, page_size=20):
 
 def edit_detail(store, qa_id):
     with store.connect() as db:
+        db.execute('BEGIN')
         rows = members(db,qa_id)
         document = db.execute('SELECT units,name FROM documents WHERE id=?',(rows[0]['document_id'],)).fetchone()
         unit = next((u for u in json.loads(document['units']) if u['id']==rows[0]['unit_id']),None)
@@ -52,14 +56,21 @@ def edit_detail(store, qa_id):
         draft = db.execute('SELECT after_json FROM qa_revisions WHERE id=?',(revision['id'],)).fetchone() if revision else None
         return dict(draft_versions=json.loads(draft[0]) if draft and revision['status']!='applied' else [], versions=[dict(id=r['id'], row=json.loads(r['row_json']), row_hash=r['row_hash']) for r in rows],
                     document_name=document['name'], document_id=rows[0]['document_id'],
-                    evidence=unit, revision=revision)
+                    evidence=unit, revision=revision,edit_version=edit_version(rows,revision))
 
 
-def queue_revision(store, qa_id, versions):
+def edit_version(rows, revision):
+    return digest([sorted((r['id'],r['row_hash']) for r in rows),
+                   [revision['id'],revision['status']] if revision else None])
+
+
+def queue_revision(store, qa_id, versions, expected_edit_version=None):
     from .pipeline import validate_row
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         rows = members(db,qa_id)
+        if expected_edit_version is not None and expected_edit_version!=edit_version(rows,latest_revision(db,qa_id)):
+            raise EditConflict('其他操作已更新本组问答或修改草稿。请刷新最新版本后再保存；本次输入未覆盖任何记录。')
         for r in rows:
             formal = db.execute('SELECT row_json FROM qas WHERE id=?',(r['id'],)).fetchone()
             if r['status']!='approved' or formal[0]!=r['row_json']:
@@ -75,7 +86,7 @@ def queue_revision(store, qa_id, versions):
         for r in rows:
             v = next(v for v in versions if v['id']==r['id'])
             if v['expected_hash']!=r['row_hash']:
-                raise ValueError('内容已被修改，请刷新后重新编辑。')
+                raise EditConflict('内容已被修改，请刷新最新版本后重新编辑；本次输入未覆盖任何记录。')
             row = json.loads(r['row_json'])
             row.update({k:v[k].strip() for k in ('input','thinking','output')})
             topic = dict(db.execute('SELECT * FROM topics WHERE id=?',(r['topic_id'],)).fetchone())
@@ -110,6 +121,7 @@ def process_revision(store, task, worker, call):
         before = json.loads(revision['before_json'])
         changes = json.loads(revision['after_json'])
         doc = store.document(task['document_id'])
+        verify_reference(doc,store.root)
         unit = next(u for u in doc['units'] if u['id']==before[0]['unit_id'])
         candidates = [dict(r,row=next(v['row'] for v in changes if v['id']==r['id'])) for r in before]
         for c in candidates:
@@ -152,6 +164,9 @@ def process_revision(store, task, worker, call):
             db.execute("UPDATE tasks SET status='succeeded',stage='qa_revision' WHERE id=?",(task['id'],))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc['id'],'qa_revision_'+status,
                        encode({'revision_id':revision_id,'seconds':round(time.perf_counter()-started,3)}),time.time()))
+    except WorkInterrupted:
+        # Let the shared executor requeue this exact revision on shutdown.
+        raise
     except Exception as error:
         with store.connect() as db:
             db.execute('BEGIN IMMEDIATE')

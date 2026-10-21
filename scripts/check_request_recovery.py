@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--compare',action='store_true',help='额外比较两轮2048/8192的分析调用，不使用响应缓存')
     args=parser.parse_args()
     if not api_key():
-        print('GLM_API_KEY is not configured.'); return 1
+        print('API_KEY is not configured.'); return 1
     folder=ROOT/'runtime/request-recovery-check'/str(time.time_ns())
     folder.mkdir(parents=True)
     report={'synthetic':True,'calls':[],'cold':True}

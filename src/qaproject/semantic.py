@@ -12,7 +12,7 @@ import threading
 import time
 
 from .settings import ROOT, settings
-from .store import digest, normalized
+from .store import digest, normalized, uid
 
 
 def active_topics(store):
@@ -262,7 +262,7 @@ def encode_texts(model_dir, model_id, cache, texts, timeout=30):
     texts = list(dict.fromkeys(t for t in texts if t and t.strip()))
     if not texts:
         return {}
-    job_path = Path(cache).parent / 'dedup-job.json'
+    job_path = Path(cache).parent / ('dedup-job-'+uid()+'.json')
     job = {'model_dir': str(model_dir), 'model_id': model_id, 'cache': str(cache), 'texts': texts}
     job_path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
     env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),

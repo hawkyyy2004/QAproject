@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import csv
 import io
@@ -5,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 import time
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -13,9 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .demo import seed_demo
 from .pipeline import Worker, approve, approve_document, reject
-from .settings import ROOT, FIELDS, settings, api_key, image_media_type, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
+from .settings import ROOT, FIELDS, settings, api_key, image_media_type, runtime_directory, MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
 from .store import Store, uid
 from .semantic import SemanticSearch, SearchCoordinator
+from .execution import ExecutionLimits, execution_config
+from .conflicts import EditConflict
+from .library import LibraryIndex
+from .persistence import RuntimeLease
 
 
 class CommitBody(BaseModel):
@@ -35,45 +41,83 @@ class EditVersion(BaseModel):
 class EditBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
     versions: list[EditVersion] = Field(min_length=1, max_length=2)
+    expected_edit_version: str | None = Field(default=None,min_length=64,max_length=64)
 
 
-def create_app(runtime=None, seed=False, workers=True):
-    runtime = Path(runtime or ROOT/'runtime')
+class LibraryFile(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=64,max_length=64)
+    version: str = Field(min_length=64,max_length=64)
+
+
+class LibraryImport(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    files: list[LibraryFile] = Field(min_length=1,max_length=50)
+
+
+def create_app(runtime=None, seed=False, workers=True, library_root=None):
+    runtime = runtime_directory(runtime)
     stores = {'live':Store(runtime/'live')}
     if seed:
         stores['demo']=Store(runtime/'demo')
         seed_demo(stores['demo'])
     searches = {mode: SemanticSearch(store) for mode, store in stores.items()}
     search_runner = SearchCoordinator(searches.values())
-    runners = [Worker(store, before_process=search_runner.interrupt) for store in stores.values()] if workers else []
+    library = LibraryIndex(stores['live'],library_root or settings().get('library_root'),busy=search_runner.busy)
+    concurrency = execution_config(settings())
+    limits = ExecutionLimits(concurrency['model_request_concurrency'], concurrency['document_concurrency'])
+    runners = [Worker(store, before_process=search_runner.interrupt, limits=limits)
+               for store in stores.values() for _ in range(concurrency['document_concurrency'])] if workers else []
     session = secrets.token_urlsafe(24)
+    access = settings().get('access') or {}
+    allowed_hosts = {'127.0.0.1','localhost','testserver',*access.get('allowed_hosts',[])}
+    allowed_origins = set(access.get('allowed_origins',[]))
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
-        for worker in runners: worker.start()
-        if workers: search_runner.start()
+        lease = RuntimeLease(runtime) if workers else contextlib.nullcontext()
+        lease.__enter__()
         try:
+            if workers:
+                for store in stores.values(): store.recover_abandoned()
+            for worker in runners: worker.start()
+            if workers:
+                search_runner.start()
+                library.start()
             yield
         finally:
             for worker in runners: worker.stop.set()
-            search_runner.close()
+            try:
+                await asyncio.gather(asyncio.to_thread(library.close),asyncio.to_thread(search_runner.close),return_exceptions=True)
+                # Drain current calls and persist resumable tasks before another
+                # application starts using the same files / response cache.
+                for worker in runners:
+                    if worker.thread.ident is not None:
+                        await asyncio.to_thread(worker.thread.join)
+                await asyncio.to_thread(limits.close)
+            finally:
+                lease.__exit__(None,None,None)
 
     app=FastAPI(title='QAproject',lifespan=lifespan)
     app.state.stores=stores
     app.state.session=session
     app.state.searches=searches
     app.state.search_runner=search_runner
+    app.state.runners=runners
+    app.state.execution_limits=limits
+    app.state.library=library
+    app.state.runtime=runtime
 
     @app.middleware('http')
     async def local_access(request, call_next):
-        host=request.headers.get('host','').split(':')[0]
-        if host not in {'127.0.0.1','localhost','testserver'}:
-            return JSONResponse({'detail':'仅允许本机访问。'},status_code=403)
+        host=urlsplit('//'+request.headers.get('host','')).hostname
+        if host not in allowed_hosts:
+            return JSONResponse({'detail':'访问地址未配置，请使用允许的服务地址。'},status_code=403)
         if request.method not in {'GET','HEAD','OPTIONS'}:
             if request.headers.get('x-qa-session') != session:
                 return JSONResponse({'detail':'会话已更新，请刷新页面。'},status_code=403)
             origin=request.headers.get('origin')
-            if origin and origin not in {f'http://{request.headers.get("host")}'}:
+            if origin and origin not in {str(request.base_url).rstrip('/'),*allowed_origins}:
                 return JSONResponse({'detail':'来源校验失败。'},status_code=403)
         return await call_next(request)
 
@@ -85,14 +129,46 @@ def create_app(runtime=None, seed=False, workers=True):
     async def validation_error(request,error):
         return JSONResponse({'detail':str(error)},status_code=400)
 
+    @app.exception_handler(EditConflict)
+    async def edit_conflict(request,error):
+        return JSONResponse({'detail':str(error),'code':'edit_conflict'},status_code=409)
+
     @app.get('/api/bootstrap')
     def bootstrap():
         cfg=settings()
         return {'session':session,'key_configured':bool(api_key()),'base_url':cfg['base_url'],
+                'library_enabled':bool(library.root),
                 'text_model':cfg['text_model'],'vision_model':cfg.get('vision_model'),
                 'limits':{'max_file_mb':cfg['max_file_mb'],'max_pages':cfg['max_pages'],
                           'min_topics_per_document':MIN_DOCUMENT_TOPICS,'max_topics_per_document':MAX_DOCUMENT_TOPICS,
                           'max_search_terms_per_document':MAX_DOCUMENT_SEARCH_TERMS}}
+
+    @app.get('/api/library')
+    def library_files(q:str=Query('',max_length=200),page:int=Query(1,ge=1),page_size:int=Query(30,ge=1,le=100)):
+        return library.list_files(q,page,page_size)
+
+    @app.post('/api/library/refresh')
+    def library_refresh():
+        return library.request_refresh()
+
+    @app.post('/api/library/imports')
+    def library_import(body:LibraryImport):
+        results=[]
+        for entry in body.files:
+            started=time.perf_counter()
+            try:
+                results.append(library.import_entry(entry.id,entry.version,settings()['max_file_mb']*1024*1024))
+            except (ValueError,OSError) as error:
+                stores['live'].event(None,'library_import_failed',{'entry_id':entry.id,'stage':'registration',
+                    'error_type':type(error).__name__,'seconds':round(time.perf_counter()-started,6)})
+                results.append({'entry_id':entry.id,'error':str(error) if isinstance(error,ValueError)
+                                else '资料目录暂不可用，请检查挂载后重试。'})
+        return results
+
+    @app.get('/api/queue')
+    def queue(mode='live'):
+        return dict(workspace(mode).queue_summary(),document_concurrency=concurrency['document_concurrency'],
+                    model_request_concurrency=concurrency['model_request_concurrency'])
 
     @app.get('/api/documents')
     def documents(mode='live', summary_only:bool=False):
@@ -150,11 +226,11 @@ def create_app(runtime=None, seed=False, workers=True):
     @app.get('/api/originals/{doc_id}')
     def original(doc_id,mode='live'):
         store=workspace(mode)
-        doc=store.document(doc_id)
-        path=Path(doc['path']).resolve()
-        if not path.is_relative_to(store.root/'originals') or not path.is_file():
+        try:
+            path,name=store.original(doc_id)
+        except (ValueError,OSError):
             raise HTTPException(404,'文件不存在')
-        return FileResponse(path,filename=doc['name'])
+        return FileResponse(path,filename=name)
 
     @app.post('/api/candidates/{candidate_id}/approve')
     def commit(candidate_id,body:CommitBody,mode='live'):
@@ -239,7 +315,7 @@ def create_app(runtime=None, seed=False, workers=True):
     def qa_edit(qa_id,body:EditBody,mode='live'):
         from .qa_summary import queue_revision
         if mode!='live': raise HTTPException(400,'演示记录不执行正式修改')
-        return queue_revision(workspace(mode),qa_id,[v.model_dump() for v in body.versions])
+        return queue_revision(workspace(mode),qa_id,[v.model_dump() for v in body.versions],body.expected_edit_version)
 
     @app.post('/api/qas/{qa_id}/retry')
     def qa_edit_retry(qa_id,mode='live'):

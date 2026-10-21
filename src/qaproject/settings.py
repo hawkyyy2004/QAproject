@@ -23,19 +23,25 @@ def settings():
     return json.loads((ROOT / 'config/settings.json').read_text(encoding='utf-8'))
 
 
+def runtime_directory(explicit=None):
+    value = explicit or os.environ.get('QA_RUNTIME_DIR') or settings().get('runtime_dir')
+    path = Path(value).expanduser() if value else ROOT/'runtime'
+    return (path if path.is_absolute() else ROOT/path).resolve()
+
+
 def api_key():
     """Read only the authorized credential variable; never evaluate shell code."""
     path = ROOT / '.env.local'
     if path.is_file():
         for line in path.read_text(encoding='utf-8-sig').splitlines():
             name, sep, value = line.strip().partition('=')
-            if sep and name == 'GLM_API_KEY':
+            if sep and name == 'API_KEY':
                 value = value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in '\"\'':
                     value = value[1:-1]
                 if value:
                     return value
-    return os.environ.get('GLM_API_KEY', '').strip()
+    return os.environ.get('API_KEY', '').strip()
 
 
 def escaped(value):

@@ -136,6 +136,7 @@ class Store:
             CREATE INDEX IF NOT EXISTS qas_created ON qas(created DESC,id DESC);
             CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied REAL);
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
+            CREATE INDEX IF NOT EXISTS tasks_document_state ON tasks(document_id,status);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);
             CREATE INDEX IF NOT EXISTS candidate_docs ON candidates(document_id);
             CREATE INDEX IF NOT EXISTS pair_docs ON qa_pairs(document_id);
@@ -146,12 +147,17 @@ class Store:
                 db.execute('ALTER TABLE tasks ADD COLUMN review_candidate_id TEXT REFERENCES candidates(id)')
             if 'revision_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
                 db.execute('ALTER TABLE tasks ADD COLUMN revision_id TEXT REFERENCES qa_revisions(id)')
+            if 'initial_stage' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
+                db.execute("ALTER TABLE tasks ADD COLUMN initial_stage TEXT NOT NULL DEFAULT ''")
             if 'repair_attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(qa_pairs)')}:
                 db.execute('ALTER TABLE qa_pairs ADD COLUMN repair_attempts INTEGER NOT NULL DEFAULT 0')
             if 'unit_count' not in {r['name'] for r in db.execute('PRAGMA table_info(documents)')}:
                 db.execute('ALTER TABLE documents ADD COLUMN unit_count INTEGER DEFAULT 0')
                 db.execute('UPDATE documents SET unit_count=json_array_length(units)')
             columns = {r['name'] for r in db.execute('PRAGMA table_info(documents)')}
+            for name, default in [('source_kind',"'upload'"),('source_root',"''"),('source_signature',"''")]:
+                if name not in columns:
+                    db.execute(f'ALTER TABLE documents ADD COLUMN {name} TEXT DEFAULT {default}')
             for name, default in [('progress', "''"), ('timings', "'{}'")]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE documents ADD COLUMN {name} TEXT DEFAULT {default}')
@@ -266,6 +272,7 @@ class Store:
     def import_file(self, name, content, mode):
         h = hashlib.sha256(content).hexdigest()
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             old = db.execute('SELECT id FROM documents WHERE content_hash=?', (h,)).fetchone()
             if old:
                 return old['id'], False
@@ -317,6 +324,63 @@ class Store:
         for candidate in item['candidates']:
             candidate.pop('row_json', None)
         return item
+
+    def import_reference(self, path, content_hash, root, version):
+        """Register a selected library original without writing a second original."""
+        path, root = Path(path), Path(root)
+        if path.resolve()!=path or not path.is_file() or not path.is_relative_to(root):
+            raise ValueError('资料来源不在已配置目录内。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT id,path,content_hash,source_kind,source_root,source_signature FROM documents WHERE content_hash=?',(content_hash,)).fetchone()
+            if old:
+                if old['path']!=str(path):
+                    from .source_files import original_path, verify_reference
+                    try:
+                        verify_reference(dict(old),self.root)
+                        original_path(dict(old),self.root)
+                    except (ValueError,OSError):
+                        raise ValueError('已有相同内容的历史资料，但原件已变化或缺失；请恢复原件或进行显式来源迁移，不能静默改写历史路径。') from None
+                return old['id'],False
+            doc_id = uid()
+            db.execute('''INSERT INTO documents(id,content_hash,name,path,status,created,mode,source_kind,source_root,source_signature)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',(doc_id,content_hash,path.name,str(path),'queued',time.time(),'live','library',str(root),version))
+            db.execute('INSERT INTO tasks(id,document_id,status) VALUES(?,?,?)',(uid(),doc_id,'queued'))
+            return doc_id,True
+
+    def original(self, doc_id):
+        from .source_files import original_path, verify_reference
+        with self.connect() as db:
+            row = db.execute('SELECT id,path,name,content_hash,source_kind,source_root,source_signature FROM documents WHERE id=?',(doc_id,)).fetchone()
+        if not row:
+            raise ValueError('原始资料不存在。')
+        doc = dict(row)
+        verify_reference(doc,self.root)
+        return original_path(doc,self.root),doc['name']
+
+    def recover_abandoned(self):
+        """Called only after the application owns the exclusive runtime lock."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT id,document_id,stage,revision_id FROM tasks WHERE status='running'").fetchall()
+            for task in rows:
+                db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),task['document_id'],'task_recovered',
+                    encode({'task_id':task['id'],'previous_stage':task['stage'],'reason':'exclusive_runtime_restart'}),time.time()))
+            db.execute("""UPDATE tasks SET status='queued',worker=NULL,lease_until=0,
+                stage=COALESCE(NULLIF(initial_stage,''),stage) WHERE status='running'""")
+            db.execute("""UPDATE qa_revisions SET status='queued',note='服务已恢复，等待继续审核',updated=?
+                WHERE status='reviewing' AND id IN (SELECT revision_id FROM tasks WHERE status='queued')""",(time.time(),))
+            db.execute("""UPDATE documents SET status='queued',progress='服务已恢复，等待继续处理'
+                WHERE id IN (SELECT document_id FROM tasks WHERE status='queued' AND revision_id IS NULL)
+                AND status IN ('parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight')""")
+            return len(rows)
+
+    def queue_summary(self):
+        with self.connect() as db:
+            counts = dict(db.execute("SELECT status,COUNT(*) FROM tasks WHERE status IN ('queued','running','failed') GROUP BY status"))
+            active = [dict(r) for r in db.execute("""SELECT d.id,d.name,d.status,d.progress FROM tasks t
+                JOIN documents d ON d.id=t.document_id WHERE t.status='running' ORDER BY t.rowid LIMIT 2""")]
+        return dict(queued=counts.get('queued',0),running=counts.get('running',0),failed=counts.get('failed',0),active=active)
 
     def documents(self, summary_only=False):
         if summary_only:
@@ -539,18 +603,25 @@ class Store:
             db.execute('INSERT INTO assets VALUES(?,?,?,?,?,?)', (asset_id, doc_id, str(path), hashlib.sha256(path.read_bytes()).hexdigest(), page, label))
         return asset_id
 
-    def claim(self, worker, document_id=None):
+    def claim(self, worker, document_id=None, *, excluded_documents=()):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute("UPDATE tasks SET status='queued' WHERE status='running' AND lease_until<?", (time.time(),))
-            row = db.execute("SELECT * FROM tasks WHERE status='queued'"+
-                             (' AND document_id=?' if document_id else '')+
-                             " ORDER BY CASE WHEN stage='quality_queued' OR review_candidate_id IS NOT NULL OR revision_id IS NOT NULL THEN 2 WHEN stage='topic_reclassification' THEN 1 ELSE 0 END,rowid LIMIT 1",
-                             (document_id,) if document_id else ()).fetchone()
+            db.execute("UPDATE tasks SET status='queued',stage=COALESCE(NULLIF(initial_stage,''),stage) WHERE status='running' AND lease_until<?", (time.time(),))
+            filters, args = [], []
+            if document_id:
+                filters.append('t.document_id=?')
+                args.append(document_id)
+            if excluded_documents:
+                filters.append('t.document_id NOT IN ('+','.join('?' for _ in excluded_documents)+')')
+                args.extend(excluded_documents)
+            row = db.execute("""SELECT t.* FROM tasks t WHERE t.status='queued'
+                AND NOT EXISTS(SELECT 1 FROM tasks active WHERE active.document_id=t.document_id AND active.status='running')"""+
+                ''.join(' AND '+part for part in filters)+
+                " ORDER BY CASE WHEN COALESCE(NULLIF(t.initial_stage,''),t.stage)='quality_queued' OR t.review_candidate_id IS NOT NULL OR t.revision_id IS NOT NULL THEN 2 WHEN COALESCE(NULLIF(t.initial_stage,''),t.stage)='topic_reclassification' THEN 1 ELSE 0 END,t.rowid LIMIT 1", args).fetchone()
             if not row:
                 return None
-            db.execute("UPDATE tasks SET status='running',worker=?,lease_until=?,attempts=attempts+1 WHERE id=?", (worker, time.time()+1800, row['id']))
-            return dict(row)
+            db.execute("UPDATE tasks SET status='running',worker=?,lease_until=?,attempts=attempts+1,initial_stage=COALESCE(NULLIF(initial_stage,''),stage) WHERE id=?", (worker, time.time()+1800, row['id']))
+            return dict(row,stage=row['initial_stage'] or row['stage'])
 
     def task_update(self, task_id, worker, stage, status='running'):
         with self.connect() as db:

@@ -16,6 +16,8 @@ from .store import Store, uid, digest, encode, normalized, classification_catalo
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection
 from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
+from .execution import DEFAULT_LIMITS, WorkInterrupted
+from .source_files import verify_reference
 
 CHECKS = ['supported', 'independent', 'scope_correct', 'knowledge_value', 'distinct', 'topic_correct']
 BILINGUAL_CHECKS = ['language_correct', 'translation_consistent']
@@ -301,9 +303,10 @@ def bounded_analysis(groups, run, concurrency):
 
 
 class Worker:
-    def __init__(self, store, before_process=None):
+    def __init__(self, store, before_process=None, limits=None):
         self.store = store
         self.before_process = before_process
+        self.limits = limits if limits is not None else DEFAULT_LIMITS
         self.name = 'local-'+uid()[:8]
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -312,10 +315,34 @@ class Worker:
         self.thread.start()
 
     def loop(self):
-        while not self.stop.wait(1):
-            task = self.store.claim(self.name)
-            if task:
+        while not self.stop.is_set():
+            try:
+                worked = self.run_once()
+            except Exception as error:
+                # Do not let a transient queue/database failure kill a slot or
+                # print provider/evidence content through threading.excepthook.
+                try:
+                    self.store.event(None, 'worker_error', {'error_type':type(error).__name__})
+                except Exception:
+                    pass
+                worked = False
+            if not worked:
+                self.stop.wait(.25)
+
+    def run_once(self):
+        if self.stop.is_set() or not self.limits.documents.acquire(blocking=False):
+            return False
+        try:
+            task = self.limits.claim(self.store, self.name)
+            if not task:
+                return False
+            try:
                 self.process(task)
+            finally:
+                self.limits.release(self.store, task)
+            return True
+        finally:
+            self.limits.documents.release()
 
     def process(self, task):
         if self.before_process:
@@ -340,12 +367,14 @@ class Worker:
 
         def stage(name, progress=''):
             nonlocal current_stage, phase_start
+            self.limits.check(self.stop)
             save_timing()
             current_stage, phase_start = name, time.perf_counter()
             store.task_update(task['id'], self.name, name)
             store.update_document(doc['id'], status=name, error='', progress=progress)
 
         def call_cached(kind, instruction, payload, group):
+            self.limits.check(self.stop)
             store.task_update(task['id'], self.name, kind)
             facts_request = kind=='analysis' and payload.get('analysis_phase')=='facts'
             token_limit = config.get(kind+'_max_tokens', config['max_output_tokens'])
@@ -481,7 +510,13 @@ class Worker:
             while True:
                 store.task_update(task['id'], self.name, kind)
                 try:
-                    result, stats = GLMClient(config).call(instruction, payload, group, max_tokens=token_limit)
+                    with self.limits.request(self.stop, lambda: store.task_update(task['id'], self.name, kind)) as wait_seconds:
+                        try:
+                            result, stats = GLMClient(config).call(instruction, payload, group, max_tokens=token_limit)
+                        except ProviderError as error:
+                            error.stats['request_wait_seconds'] = wait_seconds
+                            raise
+                    stats = dict(stats, request_wait_seconds=wait_seconds)
                     if not response_shape_ok(kind, instruction, result):
                         raise ProviderError('模型输出缺少必需字段，结构无效。', 'json', dict(stats, error_category='shape'))
                     if facts_request:
@@ -551,10 +586,14 @@ class Worker:
                 spec = json.loads((ROOT/'config/embedding-model.json').read_text())
                 model_id = digest([dedup.get('model_id','bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
                 try:
-                    duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
-                        model_id, store.root/'search.sqlite3', doc['id'],
-                        [v['qa']['input'] for c in candidates for v in c['versions'] if v['qa']['language']=='zh'],
-                        float(dedup.get('dedup_threshold', 0.93)))
+                    with self.limits.local_embedding:
+                        self.limits.check(self.stop)
+                        duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
+                            model_id, store.root/'search.sqlite3', doc['id'],
+                            [v['qa']['input'] for c in candidates for v in c['versions'] if v['qa']['language']=='zh'],
+                            float(dedup.get('dedup_threshold', 0.93)))
+                except WorkInterrupted:
+                    raise
                 except Exception:
                     duplicates = None
                     store.event(doc['id'], 'cross_dedup_unavailable', {'run_id':run_id})
@@ -725,13 +764,15 @@ class Worker:
                            encode({'run_id':run_id,'timings':timings,'seconds':round(time.perf_counter()-started,2)}),time.time()))
             return True
 
-        if task.get('revision_id'):
-            from .qa_summary import process_revision
-            current_stage = 'qa_revision_review'
-            process_revision(store,task,self.name,call_cached)
-            return
-
         try:
+            if task.get('revision_id'):
+                from .qa_summary import process_revision
+                current_stage = 'qa_revision_review'
+                process_revision(store,task,self.name,call_cached)
+                return
+            if doc.get('source_kind')=='library':
+                current_stage = 'source_validation'
+                verify_reference(doc,store.root)
             if task.get('review_candidate_id'):
                 target = next((c for c in doc['candidates'] if c['id']==task['review_candidate_id']),None)
                 if not target or target['status'] in ('approved','rejected'):
@@ -763,10 +804,17 @@ class Worker:
                     store.update_document(doc['id'], units=units)
             else:
                 def parsing_progress(done, total):
+                    self.limits.check(self.stop)
                     store.task_update(task['id'], self.name, 'parsing')
                     store.update_document(doc['id'], pages=total, progress=f'已解析 {done}/{total} 页')
 
-                units, pages = extract(store, doc, config, progress=parsing_progress)
+                (units, pages), wait_seconds, preparation_seconds = self.limits.parse(
+                    lambda: extract(store, doc, config, progress=parsing_progress), self.stop,
+                    lambda: store.task_update(task['id'], self.name, 'parsing'))
+                self.limits.check(self.stop)
+                verify_reference(doc,store.root)
+                store.event(doc['id'], 'evidence_prepared', {'run_id':run_id,
+                    'parser_wait_seconds':wait_seconds, 'preparation_seconds':preparation_seconds})
                 store.update_document(doc['id'], units=units, pages=pages)
             if doc['mode'] == 'demo':
                 save_timing()
@@ -1034,6 +1082,19 @@ class Worker:
                 store.event(doc['id'],'stale_worker_result',{'run_id':run_id,'stage':current_stage,'error_type':type(error).__name__})
                 return
             save_timing()
+            if isinstance(error, WorkInterrupted):
+                with store.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    assert_lease(db, task['id'], self.name)
+                    db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0,stage=? WHERE id=?", (task['stage'],task['id']))
+                    if task.get('revision_id'):
+                        db.execute("UPDATE qa_revisions SET status='queued',note='服务停止，启动后继续审核',updated=? WHERE id=?",
+                                   (time.time(),task['revision_id']))
+                    else:
+                        db.execute("UPDATE documents SET status='queued',progress='服务停止，已保留进度，启动后继续' WHERE id=?", (doc['id'],))
+                    db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc['id'],'run_interrupted',
+                        encode({'run_id':run_id,'stage':current_stage,'seconds':round(time.perf_counter()-started,2)}),time.time()))
+                return
             message = str(error) if isinstance(error,ValueError) else '内部处理失败；已保留证据及候选，可重试继续。'
             store.event(doc['id'], 'run_failed', {'run_id':run_id,'stage':current_stage,'error':message,
                                                 'error_type':type(error).__name__,'seconds':round(time.perf_counter()-started,2),'timings':timings})

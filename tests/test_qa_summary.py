@@ -123,7 +123,7 @@ def test_edit_validation_sessions_versions_and_fixed_fields(setup_pipeline):
     changed=[dict(v) for v in versions];changed[0]['source']='forged'
     assert client.post(url,json={'versions':changed}).status_code==422
     changed=[dict(v) for v in versions];changed[0]['expected_hash']='stale'
-    assert client.post(url,json={'versions':changed}).status_code==400
+    assert client.post(url,json={'versions':changed}).status_code==409
     changed=[dict(v) for v in versions];changed[0]['output']='   '
     assert client.post(url,json={'versions':changed}).status_code==400
     assert client.get('/api/qas/missing').status_code==400

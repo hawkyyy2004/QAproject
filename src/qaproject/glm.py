@@ -72,7 +72,7 @@ class GLMClient:
     def call(self, instruction, payload, units=(), force_model=None, max_tokens=None):
         key = self._key if self._key is not None else api_key()
         if not key:
-            raise ValueError('未配置 GLM_API_KEY，请填写项目 .env.local。')
+            raise ValueError('未配置 API_KEY，请填写项目 .env.local。')
         visual = any(u.get('image') for u in units)
         model = force_model or (self.config.get('vision_model') if visual else self.config['text_model'])
         if not model:
