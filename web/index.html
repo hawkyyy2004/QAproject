@@ -3,14 +3,13 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>QAproject · 语料工作台</title>
-  <link rel="stylesheet" href="/style.css?v=20261021-library2">
+  <link rel="stylesheet" href="/style.css?v=20261022-v13-ui">
 </head>
 <body>
   <aside class="sidebar">
     <a class="brand" href="#files"><span class="brand-mark">Q<span>↗</span></span><span>QAproject<small>语料处理工作台</small></span></a>
     <div class="nav-caption">工作空间</div>
     <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button></nav>
-    <div class="sidebar-note"><div class="tiny-orbit">✦</div><strong>宽主题，细检索</strong><p>用稳定主题归类，用具体关键词找到每一份资料。</p><div class="note-line"></div><span>GLM 驱动 · 来源可追溯</span></div>
   </aside>
   <div class="workspace">
     <header class="topbar"><div class="breadcrumb">工作台 <span>/</span> <strong id="crumb">文件处理</strong></div><button class="connection" id="connection"><span class="green-dot"></span><span id="connection-text">正在连接本地服务</span><span data-icon="chevron"></span></button></header>
@@ -45,7 +44,7 @@
   <div id="connection-popover" class="connection-popover" hidden></div>
   <dialog id="library-picker" class="qa-editor library-picker" aria-labelledby="library-title"><div class="drawer-head"><h2 id="library-title">从服务器资料库选择</h2><button id="library-close" class="icon-button" aria-label="关闭资料库">×</button></div><div class="drawer-body"><p id="library-status" role="status"></p><div class="library-toolbar"><input id="library-query" placeholder="搜索文件名称或目录" aria-label="搜索资料库"><button id="library-search" class="button secondary">搜索</button><button id="library-refresh" class="button ghost">更新目录</button></div><div class="table-scroll"><table><thead><tr><th>选择</th><th>资料名称</th><th>大小</th><th>状态</th></tr></thead><tbody id="library-rows"></tbody></table></div></div><div class="qa-editor-footer"><span id="library-page-info"></span><div><button id="library-prev" class="button ghost">上一页</button><button id="library-next" class="button ghost">下一页</button><button id="library-import" class="button primary" disabled>开始处理（0）</button></div></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/app.js?v=20261021-connection-copy"></script>
+  <script src="/app.js?v=20261022-v13-ui"></script>
   <script src="/library.js?v=20261021-library2"></script>
 </body>
 </html>
