@@ -78,6 +78,15 @@ def limit_search_terms(terms, limit=MAX_DOCUMENT_SEARCH_TERMS):
     return result
 
 
+def _append_search_terms(topics, terms):
+    """Merge display keywords in place, preserving spelling and encounter order."""
+    seen = {key: set(topic['keywords']) for key, topic in topics.items()}
+    for key, word in terms:
+        if key in topics and word not in seen[key]:
+            topics[key]['keywords'].append(word)
+            seen[key].add(word)
+
+
 class Store:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -143,24 +152,25 @@ class Store:
             ''')
             if db.execute('PRAGMA user_version').fetchone()[0] < 1:
                 db.execute('PRAGMA user_version=1')
-            if 'review_candidate_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
-                db.execute('ALTER TABLE tasks ADD COLUMN review_candidate_id TEXT REFERENCES candidates(id)')
-            if 'revision_id' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
-                db.execute('ALTER TABLE tasks ADD COLUMN revision_id TEXT REFERENCES qa_revisions(id)')
-            if 'initial_stage' not in {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}:
-                db.execute("ALTER TABLE tasks ADD COLUMN initial_stage TEXT NOT NULL DEFAULT ''")
-            if 'repair_attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(qa_pairs)')}:
-                db.execute('ALTER TABLE qa_pairs ADD COLUMN repair_attempts INTEGER NOT NULL DEFAULT 0')
-            if 'unit_count' not in {r['name'] for r in db.execute('PRAGMA table_info(documents)')}:
-                db.execute('ALTER TABLE documents ADD COLUMN unit_count INTEGER DEFAULT 0')
-                db.execute('UPDATE documents SET unit_count=json_array_length(units)')
-            columns = {r['name'] for r in db.execute('PRAGMA table_info(documents)')}
-            for name, default in [('source_kind',"'upload'"),('source_root',"''"),('source_signature',"''")]:
-                if name not in columns:
-                    db.execute(f'ALTER TABLE documents ADD COLUMN {name} TEXT DEFAULT {default}')
-            for name, default in [('progress', "''"), ('timings', "'{}'")]:
-                if name not in columns:
-                    db.execute(f'ALTER TABLE documents ADD COLUMN {name} TEXT DEFAULT {default}')
+            # Keep column order/defaults compatible with existing workspaces.
+            for table, additions in {
+                'tasks': [('review_candidate_id', 'TEXT REFERENCES candidates(id)'),
+                          ('revision_id', 'TEXT REFERENCES qa_revisions(id)'),
+                          ('initial_stage', "TEXT NOT NULL DEFAULT ''")],
+                'qa_pairs': [('repair_attempts', 'INTEGER NOT NULL DEFAULT 0')],
+                'documents': [('unit_count', 'INTEGER DEFAULT 0'),
+                              ('source_kind', "TEXT DEFAULT 'upload'"),
+                              ('source_root', "TEXT DEFAULT ''"),
+                              ('source_signature', "TEXT DEFAULT ''"),
+                              ('progress', "TEXT DEFAULT ''"),
+                              ('timings', "TEXT DEFAULT '{}'")],
+            }.items():
+                columns = {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}
+                for name, definition in additions:
+                    if name not in columns:
+                        db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                        if table == 'documents' and name == 'unit_count':
+                            db.execute('UPDATE documents SET unit_count=json_array_length(units)')
             for name, definition, aliases in CORE_TOPICS:
                 db.execute('INSERT OR IGNORE INTO topics VALUES(?,?,?,?)',
                            (uid(), name, definition, encode(aliases)))
@@ -180,12 +190,7 @@ class Store:
             for row in db.execute('''SELECT d.id FROM documents d JOIN document_topics dt ON dt.document_id=d.id
                 WHERE d.mode='live' GROUP BY d.id HAVING COUNT(*)>5''').fetchall():
                 if not db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(row[0],)).fetchone():
-                    task_id = uid()
-                    db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',
-                               (task_id,row[0],'queued','topic_reclassification'))
-                    db.execute("UPDATE documents SET status='queued',progress='系统自动概括整篇正式主题，无需手动筛选' WHERE id=?",(row[0],))
-                    db.execute('INSERT INTO events VALUES(?,?,?,?,?)',
-                               (uid(),row[0],'topic_reclassification_queued',encode({'task_id':task_id}),time.time()))
+                    self._queue_topic_reclassification(db, row[0])
 
     @contextlib.contextmanager
     def connect(self):
@@ -301,12 +306,8 @@ class Store:
                 'SELECT t.*,dt.keywords,dt.unit_ids FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE document_id=?', (doc_id,))]
             item['search_terms'] = [dict(x, unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
                 'SELECT term,topic_id,unit_ids FROM document_search_terms WHERE document_id=?', (doc_id,))]
-            by_topic = {t['id']: t for t in item['topics']}
-            seen = {t['id']: set(t['keywords']) for t in item['topics']}
-            for term in item['search_terms']:
-                if term['topic_id'] in by_topic and term['term'] not in seen[term['topic_id']]:
-                    by_topic[term['topic_id']]['keywords'].append(term['term'])
-                    seen[term['topic_id']].add(term['term'])
+            _append_search_terms({t['id']: t for t in item['topics']},
+                                 ((term['topic_id'], term['term']) for term in item['search_terms']))
             item['candidates'] = [dict(x, row=json.loads(x['row_json']), review=json.loads(x['review'])) for x in db.execute(
                 '''SELECT c.*,p.pair_id FROM candidates c LEFT JOIN candidate_pairs p ON p.candidate_id=c.id
                    WHERE c.document_id=? AND c.status!='discarded' ORDER BY c.created,c.rowid''', (doc_id,))]
@@ -400,13 +401,8 @@ class Store:
                     items[r['document_id']]['topics'].append(
                         {'id':r['id'], 'name':r['name'], 'keywords':json.loads(r['keywords'])})
                 by_topic = {(doc_id, t['id']): t for doc_id, d in items.items() for t in d['topics']}
-                seen = {key: set(t['keywords']) for key, t in by_topic.items()}
-                for r in db.execute('SELECT document_id,topic_id,term FROM document_search_terms'):
-                    key = (r['document_id'], r['topic_id'])
-                    topic = by_topic.get(key)
-                    if topic is not None and r['term'] not in seen[key]:
-                        topic['keywords'].append(r['term'])
-                        seen[key].add(r['term'])
+                _append_search_terms(by_topic, (((r['document_id'], r['topic_id']), r['term'])
+                    for r in db.execute('SELECT document_id,topic_id,term FROM document_search_terms')))
                 for item in items.values():
                     item.update(self.pair_counts(db, item['id']))
             return list(items.values())
@@ -509,6 +505,16 @@ class Store:
                    encode({'previous_topics':topics,'previous_terms':previous,'retained':[r['term'] for r in rows],
                            'max_per_document':MAX_DOCUMENT_SEARCH_TERMS}),time.time()))
 
+    @staticmethod
+    def _queue_topic_reclassification(db, doc_id):
+        """Use the caller's transaction for both startup and explicit reclassification."""
+        task_id = uid()
+        db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',
+                   (task_id,doc_id,'queued','topic_reclassification'))
+        db.execute("UPDATE documents SET status='queued',progress='系统自动概括整篇正式主题，无需手动筛选' WHERE id=?",(doc_id,))
+        db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'topic_reclassification_queued',encode({'task_id':task_id}),time.time()))
+        return task_id
+
     def reclassify_topics(self, doc_id):
         """Enqueue automatic classification through the normal worker; no user selection."""
         with self.connect() as db:
@@ -518,12 +524,7 @@ class Store:
             active = db.execute("SELECT id FROM tasks WHERE document_id=? AND status IN ('queued','running')",(doc_id,)).fetchone()
             if active:
                 return active['id']
-            task_id = uid()
-            db.execute('INSERT INTO tasks(id,document_id,status,stage) VALUES(?,?,?,?)',
-                       (task_id,doc_id,'queued','topic_reclassification'))
-            db.execute("UPDATE documents SET status='queued',progress='系统自动概括整篇正式主题，无需手动筛选' WHERE id=?",(doc_id,))
-            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'topic_reclassification_queued',encode({'task_id':task_id}),time.time()))
-            return task_id
+            return self._queue_topic_reclassification(db, doc_id)
 
     def legacy_topic_context(self, doc_id):
         with self.connect() as db:

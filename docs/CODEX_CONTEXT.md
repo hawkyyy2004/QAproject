@@ -244,3 +244,11 @@ PDF分支语法树与基线一致；额外本地冷准备测量有波动：120�
 ## 2026-10-21 密钥变量统一命名
 
 按用户要求，应用密钥变量统一为 `API_KEY`，本机 `.env.local` 优先、同名环境变量其次。代码、提示、脚本和配置示例同步更新；本机已有密钥仅改变量名，值保留。模型和接口配置不因此改变。
+
+## 2026-10-21 模型连接弹窗文案
+
+按用户批注，弹窗标题从“公司 GLM 连接配置”改为“模型连接配置”，删除底部.env.local及settings.json填写说明。连接地址、模型名和脱敏配置状态保留；仅前端文案调整，不修改实际配置或密钥读取。脚本资源版本已更新，刷新生效。
+
+## 2026-10-22 macOS、Windows与Linux兼容目标
+
+用户明确本地Mac/Windows之外，后期Linux服务器也必须可运行。已同步AGENTS32及README目标与各系统启动命令。只读核对：RuntimeLease已按Windows msvcrt/POSIX fcntl区分，路径用Path、嵌入子进程用sys.executable，run.py具备--no-browser/--data-dir/--library-root。当前主要实测macOS，不冒充Windows/Linux完整验收，未部署Linux。各机器独立创建.venv、填API_KEY，旧runtime跨系统来源/image绝对路径迁移需另行校验，不能直接搬库后静默改写。本轮仅文档记录和代码核查，不修改业务代码或运行数据。
