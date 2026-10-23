@@ -1,0 +1,29 @@
+.venv/
+__pycache__/
+.pytest_cache/
+runtime/
+build/
+dist/
+.env
+.env.local
+*.log
+
+# Secrets, editor leftovers and local packaging
+.env.*
+*.pem
+*.key
+.DS_Store
+*.egg-info/
+
+# Local caches and credentials
+.cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+*.pyc
+*.pyo
+*.p12
+*.pfx

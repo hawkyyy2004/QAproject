@@ -1,0 +1,37 @@
+{
+  "base_url": "https://www.dmxapi.cn/v1",
+  "text_model": "glm-5.3-flash-guan",
+  "vision_model": "glm-5.3-flash-guan",
+  "timeout_seconds": 180,
+  "max_output_tokens": 8192,
+  "target_per_document": 5,
+  "max_per_document": 7,
+  "min_per_document": 5,
+  "max_pages": null,
+  "max_file_mb": 25,
+  "submission_mode": "human_review",
+  "reasoning_effort": "low",
+  "json_mode": true,
+  "vision_json_mode": true,
+  "analysis_concurrency": 2,
+  "document_concurrency": 2,
+  "model_request_concurrency": 2,
+  "runtime_dir": null,
+  "library_root": null,
+  "access": {"allowed_hosts": [], "allowed_origins": []},
+  "generation_batch_size": 3,
+  "generation_max_images": 1,
+  "repair_max_attempts": 2,
+  "analysis_max_tokens": 8192,
+  "generation_max_tokens": 8192,
+  "review_max_tokens": 8192,
+  "max_output_tokens_ceiling": 131072,
+  "semantic_search": {
+    "enabled": true,
+    "model_dir": "runtime/models/bge-small-zh-v1.5",
+    "model_id": "bge-small-zh-v1.5-onnx-int8-cls-v1",
+    "min_similarity": 0.65
+    ,"cross_document_dedup": true
+    ,"dedup_threshold": 0.93
+  }
+}
