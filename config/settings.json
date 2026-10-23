@@ -9,7 +9,6 @@
   "min_per_document": 5,
   "max_pages": null,
   "max_file_mb": 25,
-  "figure_regions": true,
   "submission_mode": "human_review",
   "reasoning_effort": "low",
   "json_mode": true,

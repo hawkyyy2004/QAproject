@@ -49,7 +49,7 @@ def test_export_is_exact_six_fields_and_saved_images(app):
     for row in rows:
         assert list(row)==FIELDS
         assert len(row['source'].split('|'))==3
-        assert 'page-01-' in row['source']
+        assert 'page-01-seg-01' in row['source']
         assert Path(row['image']).is_file()
     d=client.get('/api/documents?mode=demo').json()[0]
     image=client.get('/api/assets/'+d['assets'][0]['id']+'?mode=demo')
