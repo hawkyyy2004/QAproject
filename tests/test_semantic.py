@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -111,9 +112,10 @@ def test_busy_defers_new_queries_and_pending_queue_is_bounded(tmp_path, monkeypa
 
 
 def test_model_inference_not_imported_by_application():
+    env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]/'src')}
     result = subprocess.run([sys.executable, '-c',
         "import sys; import qaproject.app; print(any(m in sys.modules for m in ['numpy','onnxruntime','tokenizers']))"],
-        env={'PYTHONPATH': str(Path(__file__).resolve().parents[1]/'src')}, capture_output=True, text=True, check=True)
+        env=env, capture_output=True, text=True, check=True)
     assert result.stdout.strip() == 'False'
 
 

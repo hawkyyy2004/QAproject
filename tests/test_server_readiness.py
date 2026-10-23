@@ -26,6 +26,13 @@ def client_for(app):
     return client
 
 
+def symlink_or_skip(target, link):
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f'file symlinks unavailable on this host: {exc}')
+
+
 def test_unconfigured_directory_does_not_scan_or_change_upload_pipeline(tmp_path,monkeypatch):
     app = create_app(tmp_path/'data',workers=False)
     assert app.state.library.root is None
@@ -51,7 +58,7 @@ def test_catalogue_pages_filter_names_without_reading_document_bodies(tmp_path,m
     (root/'100%观测.pdf').write_bytes(b'catalogue metadata only')
     (root/'ignored.exe').write_bytes(b'ignored')
     (root/'.private.pdf').write_bytes(b'ignored')
-    (root/'escape.pdf').symlink_to(tmp_path/'outside.pdf')
+    symlink_or_skip(tmp_path/'outside.pdf', root/'escape.pdf')
     app = create_app(tmp_path/'data',workers=False,library_root=root)
     def forbidden(*a,**kw):
         raise AssertionError('Listing or scanning must not hash/read whole PDFs')
@@ -128,7 +135,7 @@ def test_library_changes_and_path_attacks_do_not_create_tasks(tmp_path):
     path.unlink()
     outside = tmp_path/'outside.pdf'
     outside.write_bytes(b'outside')
-    path.symlink_to(outside)
+    symlink_or_skip(outside, path)
     assert client.post('/api/library/imports',json={'files':[dict(id=current['id'],version=current['version'])]}).json()[0]['error']
     assert client.get('/api/documents').json()==[]
 

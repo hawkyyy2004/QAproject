@@ -19,7 +19,7 @@ from qaproject.taxonomy import TopicSelection
     ('a\t b\r\n c  ' *2500)+'末尾',
     'short evidence',
     'x'*16000,
-])
+], ids=['cjk-repeat','scientific-repeat','x-50001','whitespace-mix','short','x-16000'])
 def test_spans_preserve_every_character_without_overlap(text):
     spans=list(text_spans(text))
     assert ''.join(text[a:b] for a,b in spans)==text

@@ -110,7 +110,10 @@ class LibraryIndex:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(path)
                         elif path.suffix.lower() in FORMATS and entry.is_file(follow_symlinks=False):
-                            stat = entry.stat(follow_symlinks=False)
+                            # Windows scandir leaves st_dev/st_ino at zero while Path.stat()
+                            # reports real values; the version hash must come from the same
+                            # call on both sides or every import looks modified.
+                            stat = path.stat()
                             relative = path.relative_to(self.root).as_posix()
                             pending.append((digest([str(self.root),relative]),str(self.root),relative,path.name,
                                 relative.casefold(),stat.st_size,stat.st_mtime,signature(path,stat),generation))
