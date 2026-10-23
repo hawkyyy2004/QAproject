@@ -53,7 +53,7 @@ def test_text_short_text_and_blank_pages_never_render_or_export_text(tmp_path, m
 
 
 @pytest.mark.parametrize('rotation', [0, 90, 180, 270])
-def test_graphic_keeps_complete_page_and_true_locator(tmp_path, rotation):
+def test_graphic_page_crops_figure_and_keeps_body_text_separate(tmp_path, rotation):
     store = Store(tmp_path/'full-page')
     with pymupdf.open() as pdf:
         page = pdf.new_page(width=600, height=800)
@@ -67,15 +67,16 @@ def test_graphic_keeps_complete_page_and_true_locator(tmp_path, rotation):
     assert pages == 1
     visual = next(u for u in units if u['image'])
     assert len(store.document(doc_id)['assets']) == 1
-    assert 'graphic_bbox' not in visual
-    assert visual['evidence_kind'] == 'pdf_page'
+    assert visual['evidence_kind'] == 'pdf_figure'
+    assert visual['locator'] == 'page-01-fig-01'
+    assert 'Figure 1. Synthetic observation' in visual['text']
     pix = pymupdf.Pixmap(visual['image'])
-    assert (pix.width, pix.height) == (expected.width, expected.height)
-    assert pix.samples == expected.samples  # includes the header, chart, caption and footer
+    # Only the artwork is rendered, never the surrounding text column.
+    assert pix.width < expected.width and pix.height < expected.height
     assert b'\x33\x99\xcc' in pix.samples  # actual plot fill survives rotation
-    text = next(u for u in units if u.get('companion_of') == visual['id'])
-    assert text['image'] == '' and text['locator'] == visual['locator'] == 'page-01-seg-01'
-    assert 'Unrelated page heading' in text['text'] and 'degrees C' in text['text']
+    body = ' '.join(u['text'] for u in units if not u['image'])
+    assert 'Unrelated page heading' in body and 'Unrelated page footer' in body
+    assert not any(u.get('companion_of') == visual['id'] for u in units)
 
 
 def test_preview_serves_full_asset_without_cropping(tmp_path):
@@ -105,8 +106,23 @@ def test_single_vector_figure_with_short_text_is_not_lost(tmp_path):
         page.draw_circle((200, 200), 60, fill=(.2, .6, .8))
         page.insert_text((140, 290), 'Radius: 60 mm')
         _, units, _ = parse(store, pdf)
-    assert len(units) == 1 and units[0]['image']
-    assert 'Radius: 60 mm' in units[0]['text']
+    assert len(units) == 2
+    assert any(u['text'] == 'Radius: 60 mm' and not u['image'] for u in units)
+    figure = next(u for u in units if u['image'])
+    assert figure['evidence_kind'] == 'pdf_figure' and figure['locator'] == 'page-01-fig-01'
+
+
+def test_shading_behind_text_is_not_cropped_as_a_figure(tmp_path):
+    store = Store(tmp_path/'shaded')
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=400, height=500)
+        page.draw_rect(pymupdf.Rect(30, 40, 370, 200), fill=(.95, .95, .85), overlay=False)
+        page.insert_textbox(pymupdf.Rect(40, 50, 360, 190),
+                            'Shaded paragraph about phosphate limitation in alpine lakes. '*5, fontsize=9)
+        doc_id, units, _ = parse(store, pdf)
+    assert all(not u['image'] for u in units)
+    assert 'phosphate limitation' in ' '.join(u['text'] for u in units)
+    assert not store.document(doc_id)['assets']
 
 
 def test_unused_image_resource_does_not_turn_text_into_a_picture(tmp_path):

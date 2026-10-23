@@ -28,13 +28,13 @@ def test_long_pdf_keeps_last_page_and_visual_evidence(tmp_path):
     units, pages = extract(store, store.document(doc_id), cfg,
                            progress=lambda done,total: progress.append((done,total)))
     assert pages == 120
-    last_visual = next(u for u in units if u['page']==120 and u['image'])
-    assert last_visual['locator'] == 'page-120-seg-01'
-    assert 'Observation 120' in last_visual['text']
-    assert len([u for u in units if u['image']]) == 2
-    assert Path(last_visual['image']).is_file()
-    text_view = next(u for u in units if u.get('companion_of')==last_visual['id'])
-    assert text_view['locator']==last_visual['locator'] and not text_view['image']
+    last_text = next(u for u in units if u['page']==120 and not u['image'])
+    assert last_text['locator'] == 'page-120-seg-01'
+    assert 'Observation 120' in last_text['text']
+    figures = [u for u in units if u['image']]
+    assert len(figures) == 2 and {u['page'] for u in figures} == {119, 120}
+    assert all(u['evidence_kind'] == 'pdf_figure' for u in figures)
+    assert Path(figures[-1]['image']).is_file()
     assert progress[0] == (0, 120) and progress[-1] == (120, 120)
     store.update_document(doc_id, units=units, pages=pages)
     groups = list(batches(units))

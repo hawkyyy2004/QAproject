@@ -108,12 +108,14 @@ def seed_demo(store):
         else:
             units=doc['units']
         topic = store.topic(sample['topic'])
-        unit=units[0]
+        # The demo rows describe the chart, which is now its own figure unit.
+        unit=next((u for u in units if u['image']), units[0])
+        image=unit['image']
         store.link_topic(doc_id,topic['id'],sample['keywords'],[unit['id']])
         reasons=[0,1,2] if '正弦' in sample['name'] else [0,1,1] if '椭圆' in sample['name'] else [0,0,2]
         for index,(question,answer) in enumerate(sample['qas']):
             row={'input':question,'thinking':sample['evidence'][reasons[index]],
-                 'output':answer,'source':source_ref(doc['path'],unit['locator'],topic['name']),'image':unit['image'],'language':'zh'}
+                 'output':answer,'source':source_ref(doc['path'],unit['locator'],topic['name']),'image':image,'language':'zh'}
             cid=uid()
             with store.connect() as db:
                 old=db.execute('SELECT id FROM candidates WHERE document_id=? AND fingerprint=?',(doc_id,normalized(question))).fetchone()

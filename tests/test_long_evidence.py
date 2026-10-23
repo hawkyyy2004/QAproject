@@ -37,7 +37,8 @@ def dense_pdf(graphic=False):
     line='Station Alpha recorded hourly temperature of 15 degrees Celsius with a calibrated sensor. '*3
     page.insert_text((20,20),'\n'.join([line]*180)+ '\nTAIL: Station Beta recorded salinity of 32 PSU.',fontsize=4)
     if graphic:
-        page.draw_circle((700,1100),60,fill=(.2,.6,.8))
+        # A full-page scan keeps its own text layer; both must survive.
+        page.insert_image(page.rect, stream=page.get_pixmap(dpi=72).tobytes('png'))
     assert len(page.get_text().strip())>16000
     return pdf
 

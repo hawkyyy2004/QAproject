@@ -57,15 +57,18 @@ def pdf_paragraphs(text):
 
 
 def has_full_page_image(page):
-    """Recognize the common single direct scan without decoding it for metadata."""
-    images = page.get_images(full=True)
-    if len(images) != 1 or images[0][-1] != 0 or min(images[0][2:4]) <= 1:
-        return False
-    # Direct-resource bbox lookup uses the PDF display commands, not image hashes.
     bounds = page.rect * page.derotation_matrix
-    rect = page.get_image_bbox(images[0]) & bounds
-    if rect.width >= bounds.width*.95 and rect.height >= bounds.height*.95:
-        return True
+    """A scan is a page whose artwork is one image covering the whole sheet."""
+    for image in page.get_images(full=True):
+        if min(image[2:4]) <= 1:
+            continue
+        # Direct-resource bbox lookup uses the PDF display commands, not image hashes.
+        try:
+            rect = page.get_image_bbox(image) & bounds
+        except (ValueError, RuntimeError):
+            continue  # resource kept but never drawn
+        if rect.width >= bounds.width*.95 and rect.height >= bounds.height*.95:
+            return True
     return False
 
 
@@ -94,6 +97,167 @@ def has_graphics(page, textpage):
     return False
 
 
+def figure_regions(page):
+    """Locate figure areas from PDF display commands, without decoding images.
+
+    Returns page-space rectangles merged from raster placements and from filled or
+    curved vector drawings. Straight rules are ignored so table grids stay text.
+    """
+    bounds = page.rect * page.derotation_matrix
+    rasters, vectors = [], []
+    for kind, bbox in page.get_bboxlog():
+        if not ("image" in kind or "imgmask" in kind):
+            continue
+        rect = pymupdf.Rect(bbox) & bounds
+        if not rect.is_empty and rect.width > 4 and rect.height > 4:
+            rasters.append(rect)
+    for drawing in page.get_cdrawings():
+        # Bars carry a fill, curves use 'c'; multi-segment line charts are polylines.
+        if not (drawing.get('fill') or any(item[0] == 'c' for item in drawing['items'])
+                or len(drawing['items']) >= 3
+                or (pymupdf.Rect(drawing['rect']).width >= 12
+                    and pymupdf.Rect(drawing['rect']).height >= 12)):
+            continue
+        rect = pymupdf.Rect(drawing['rect']) & bounds
+        # Zero-height bars still bridge neighbouring panels; the cluster is checked later.
+        if rect.width <= 1 or rect.height < .5:
+            continue
+        if rect.width >= bounds.width*.95 and rect.height >= bounds.height*.95:
+            continue
+        vectors.append(rect)
+    # Keep artwork tight; merging a wide cluster with text only gets rejected later.
+    merged = merge_regions(rasters, gap=20) + merge_regions(vectors, gap=60)
+    coverage = max((rect.get_area() for rect in rasters+vectors), default=0) / bounds.get_area()
+    return bounds, merged, coverage, rasters+vectors
+
+
+def merge_regions(parts, gap=8):
+    """Union rectangles that touch once each is padded by gap points."""
+    merged = True
+    while merged and len(parts) > 1:
+        merged = False
+        result = []
+        for rect in parts:
+            padded = rect + (-gap, -gap, gap, gap)
+            for index, other in enumerate(result):
+                if padded.intersects(other):
+                    result[index] = other | rect
+                    merged = True
+                    break
+            else:
+                result.append(rect)
+        parts = result
+    return parts
+
+
+def text_outside(page, regions):
+    """Text blocks whose centre is not inside a figure region."""
+    kept = []
+    for block in page.get_text('blocks', sort=True):
+        x0, y0, x1, y1, text = block[:5]
+        if block[6] != 0 or not text.strip():
+            continue
+        centre = pymupdf.Point((x0+x1)/2, (y0+y1)/2)
+        if any(rect.contains(centre) for rect in regions):
+            continue
+        kept.append(text.strip())
+    return kept
+
+
+CAPTION = re.compile(r'^(fig(?:ure)?\.?|tab(?:le)?\.?|图|表|附图|附表)\s*[\d一二三四五六七八九十]', re.I)
+TABLE_CAPTION = re.compile(r'^(tab(?:le)?\.?|表|附表)\s*[\d一二三四五六七八九十]', re.I)
+
+
+def figure_caption(blocks, region, bounds):
+    """Nearest caption line around a figure, used as grounding context for its image."""
+    best = None
+    for x0, y0, x1, y1, text, *_ in blocks:
+        if not CAPTION.match(text.strip()):
+            continue
+        # Below the artwork is most common; tables and some journals place it above.
+        if y0 < region.y0-48 or y0 > region.y1+48:
+            continue
+        if x1 < region.x0-24 or x0 > region.x1+24:
+            continue
+        distance = 0 if region.y0 <= y0 <= region.y1 else min(abs(y0-region.y0), abs(y0-region.y1))
+        if best is None or distance < best[0] or (distance == best[0] and y0 > best[1]):
+            best = (distance, y0, text.strip())
+    return best[2] if best else ''
+
+
+def usable_regions(regions, bounds):
+    """Drop rules, hairline shading and page-wide backgrounds."""
+    page_area = bounds.get_area()
+    kept = []
+    for rect in regions:
+        if rect.width < 40 or rect.height < 24:
+            continue
+        area = rect.get_area()
+        if area < page_area*.01 or area > page_area*.9:
+            continue
+        kept.append(rect)
+    return kept
+
+
+def near_rects(left, right, gap=40):
+    """True when two boxes are close enough to belong to one multi-panel figure."""
+    horizontal = min(left.y1, right.y1)-max(left.y0, right.y0)
+    vertical = min(left.x1, right.x1)-max(left.x0, right.x0)
+    return horizontal > -gap and vertical > -gap
+
+
+def table_or_prose(rect, caption, blocks):
+    """True when a candidate box holds a table or a dense text panel, not artwork."""
+    if caption and TABLE_CAPTION.match(caption.strip()):
+        return True
+    chars = sum(len(b[4].strip()) for b in blocks
+                if rect.contains(pymupdf.Point((b[0]+b[2])/2, (b[1]+b[3])/2)))
+    area_k = rect.get_area()/1000 or 1
+    return chars >= 150 and chars/area_k >= 9
+
+
+def group_figures(regions, blocks, bounds):
+    """Attach captions and merge adjacent panels that share one caption."""
+    captions = [figure_caption(blocks, rect, bounds) for rect in regions]
+    # Tables are text evidence; cropping them would drop every cell.
+    keep = [(rect, caption) for rect, caption in zip(regions, captions)
+            if not table_or_prose(rect, caption, blocks)]
+    regions = [rect for rect, _ in keep]
+    captions = [caption for _, caption in keep]
+    merged = []
+    for rect, caption in zip(regions, captions):
+        for index, (other, other_caption) in enumerate(merged):
+            if caption and caption == other_caption and near_rects(rect, other, 90):
+                merged[index] = (other | rect, caption)
+                break
+        else:
+            merged.append((rect, caption))
+    # A merge must not swallow the text between two distant panels.
+    kept = [(rect, caption) for rect, caption in merged
+            if drop_text_heavy([rect], blocks, bounds)]
+    # A raster figure and its vector overlay cover the same artwork; crop it once.
+    unique = []
+    for rect, caption in sorted(kept, key=lambda item: item[0].get_area(), reverse=True):
+        if any((rect & other).get_area() >= rect.get_area()*.85 for other, _ in unique):
+            continue
+        unique.append((rect, caption))
+    return [rect for rect, _ in unique], [caption for _, caption in unique]
+
+
+def drop_text_heavy(regions, blocks, bounds):
+    """Reject regions that swallow body text or tables instead of a figure."""
+    page_area = bounds.get_area()
+    total = sum(len(b[4].strip()) for b in blocks) or 1
+    kept = []
+    for rect in regions:
+        inside = sum(len(b[4].strip()) for b in blocks
+                     if rect.contains(pymupdf.Point((b[0]+b[2])/2, (b[1]+b[3])/2)))
+        if inside/total > .25 or rect.get_area() > page_area*.8:
+            continue
+        kept.append(rect)
+    return kept
+
+
 def text_alternatives(units):
     """Keep frozen visual evidence and add a text view at the same true locator."""
     result = list(units)
@@ -103,7 +267,8 @@ def text_alternatives(units):
         text = unit['text']
         readable = len(text)>=120 and (len(re.findall('[\u4e00-\u9fff]',text))>=30
                                       or len(re.findall('[A-Za-z]',text))>=80)
-        if not unit['image'] or not readable or unit['id']+':text' in ids or unit['id'] in fragment_parents:
+        if (not unit['image'] or not readable or unit['id']+':text' in ids
+                or unit['id'] in fragment_parents or unit.get('evidence_kind') == 'pdf_figure'):
             continue
         for index, (start, end) in enumerate(text_spans(text), 1):
             alternative = dict(unit, id=unit['id']+':text', image='', asset_id='',
@@ -162,7 +327,26 @@ def extract(store, doc, config, progress=None):
                 flags = pymupdf.TEXTFLAGS_TEXT | (0 if visual else pymupdf.TEXT_PRESERVE_IMAGES)
                 textpage = page.get_textpage(flags=flags)
                 text = page.get_text('text', sort=True, textpage=textpage).strip()
-                if visual or has_graphics(page, textpage):
+                # With region cropping off, keep the historical whole-page fallback.
+                bounds, regions, coverage, blocks, captions, parts = None, [], 1.0, [], [], []
+                candidates = False
+                if not visual and config.get('figure_regions', True):
+                    bounds, regions, coverage, parts = figure_regions(page)
+                    regions = usable_regions(regions, bounds)
+                    candidates = bool(regions)
+                    if regions:
+                        blocks = [b for b in page.get_text('blocks', sort=True) if b[6] == 0 and b[4].strip()]
+                        regions = drop_text_heavy(regions, blocks, bounds)
+                        regions, captions = group_figures(regions, blocks, bounds)
+                        if not regions and coverage >= .1:
+                            # One big cluster swallowed body text or a table; retry per artwork box.
+                            regions = usable_regions(parts, bounds)
+                            regions = drop_text_heavy(regions, blocks, bounds)
+                            regions, captions = group_figures(regions, blocks, bounds)
+                # Candidates carrying only body text were shading or rules, not figures.
+                text_page = candidates and not regions
+                if (visual or (not regions and not text_page and coverage > .05
+                               and has_graphics(page, textpage))):
                     pixmap = page.get_pixmap(dpi=144, alpha=False)
                     # Check the final-resolution image: downsampling could erase faint/sparse evidence.
                     blank = not text and pixmap.is_unicolor and pixmap.pixel(0, 0) == (255, 255, 255)
@@ -172,6 +356,38 @@ def extract(store, doc, config, progress=None):
                         asset = store.add_asset(doc['id'], out, n, f'第 {n} 页完整图片')
                         add(text or 'Scan page: use actual visual evidence.', n, 1, str(out), asset,
                             evidence_kind='pdf_page')
+                elif regions:
+                    # A caption belongs to its figure unit; keep it out of body text.
+                    taken = set()
+                    for rect, caption in zip(regions, captions):
+                        if not caption:
+                            continue
+                        for bi, block in enumerate(blocks):
+                            if bi in taken or block[4].strip() != caption:
+                                continue
+                            if rect.y1-2 <= block[1] <= rect.y1+48:
+                                taken.add(bi)
+                                break
+                    segment = 0
+                    for bi, (x0, y0, x1, y1, block_text, *_) in enumerate(blocks):
+                        if bi in taken:
+                            continue
+                        body = block_text.strip()
+                        if any(rect.contains(pymupdf.Point((x0+x1)/2, (y0+y1)/2)) for rect in regions):
+                            continue
+                        segment += 1
+                        add(body, n, segment, evidence_kind='extracted_text')
+                    for index, (rect, caption) in enumerate(zip(regions, captions), 1):
+                        clip = ((rect + (-4, -4, 4, 4)) & bounds) * page.rotation_matrix
+                        pixmap = page.get_pixmap(clip=clip, dpi=144, alpha=False)
+                        if pixmap.is_unicolor and pixmap.pixel(0, 0) == (255, 255, 255):
+                            continue
+                        out = folder / f'page-{n:04d}-fig-{index:02d}.png'
+                        pixmap.save(out)
+                        asset = store.add_asset(doc['id'], out, n, f'第 {n} 页插图 {index}')
+                        segment += 1
+                        add(caption or 'Figure region: use actual visual evidence.', n, segment,
+                            str(out), asset, f'page-{n:02d}-fig-{index:02d}', evidence_kind='pdf_figure')
                 else:
                     for s, paragraph in enumerate(pdf_paragraphs(text), 1):
                         add(paragraph, n, s, evidence_kind='extracted_text')
