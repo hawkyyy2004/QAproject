@@ -163,10 +163,16 @@ def extract(store, doc, config, progress=None):
                 raise ValueError(f'当前配置每份最多 {max_pages} 页，未截断处理。')
             if progress:
                 progress(0, len(pdf))
-            # MinerU layout, when frozen for this exact file, replaces page rendering:
-            # body text stays text, and every figure/table/formula is its own crop.
-            frozen = (layout_cache.load(store, doc.get('content_hash'))
-                      if str(config.get('pdf_layout', 'auto')).lower() != 'off' else {})
+            # MinerU layout replaces page rendering: body text stays text, and every
+            # figure/table/formula is its own crop. `manifest` only uses a manifest
+            # built ahead of time, `auto` also builds one now, `off` never does.
+            mode = str(config.get('pdf_layout', 'auto')).lower()
+            frozen = layout_cache.load(store, doc.get('content_hash')) if mode in {'auto', 'manifest'} else {}
+            if not frozen and mode == 'auto':
+                store.update_document(doc['id'], progress='正在按版面拆图，首次约 1 分钟')
+                frozen, note = layout_cache.prepare(store, doc, config)
+                store.event(doc['id'], 'layout_prepared',
+                            {'mode': 'mineru', 'pages': len(frozen), 'note': note})
             labels = {'figure': '图片', 'table': '表格', 'formula': '公式', 'page': '整页扫描'}
             prefixes = {'figure': 'fig', 'table': 'tbl', 'formula': 'eq', 'page': 'page'}
 

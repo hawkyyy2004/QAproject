@@ -2,10 +2,9 @@
 
 项目原先遇到含图页就整页 144 DPI 截图，因为 PyMuPDF 只能告诉你"这页有矢量线或位图"，说不出哪一块才是图。MinerU 补的正是这一段：它按版面把每页切成正文、图、表、公式，我们只裁这几块，正文继续走文字证据。
 
-两步走，互不阻塞：
+服务会自己调用 MinerU：上传后的文件在解析阶段先做一遍版面识别，写出 `<PDF hash>/manifest.json` 和裁图，再按块出证据。也可以提前用脚本批量生成清单（离线预跑），服务到时直接复用，见第二节。
 
-1. **离线**：`scripts/mineru_layout.py` 调用 MinerU，写出 `<PDF hash>/manifest.json` 和裁图。
-2. **在线**：服务解析 PDF 时读清单，把正文当文字证据、图/表/公式当图片证据；没有清单的文件照旧整页处理。
+没有 MinerU 的机器照旧整页处理，功能不会因此报错。
 
 MinerU 装在独立虚拟环境里，服务进程不导入它，`requirements.txt` 也不加它。
 
@@ -28,6 +27,12 @@ $env:MINERU_MODEL_SOURCE = 'modelscope'
 
 ## 二、生成清单
 
+**默认：不用你动手。** 上传 PDF 后，服务在解析阶段调用 MinerU（`pdf_layout=auto`），清单落在 `--layout-dir` 指向的目录，同一个文件按内容 hash 只做一次：再次解析直接复用清单，不重复耗时。
+
+首次解析会多花 1–3 分钟，界面进度显示"正在按版面拆图"。
+
+要提前批量预跑（比如晚上挂机先把 E 盘几十篇跑完，白天上传时秒过）：
+
 ```powershell
 # 一个目录（递归找 PDF），4 个文件并行
 python scripts/mineru_layout.py "E:\pdf\海洋学报" --jobs 4 `
@@ -49,6 +54,8 @@ python scripts/mineru_layout.py --list pdfs.txt --jobs 4 `
 | `--jobs 4` | 同时解析的文件数；受 CPU 与接口内存限制，4–6 是安全区间 |
 | `--force` | 已有清单也重做 |
 | `--limit N` | 只做前 N 个，适合先试跑 |
+
+预跑与服务自动生成写的是同一份清单，谁先做谁生效，不会冲突。
 
 每完成一个文件打印一行 JSON：`ok` 正常、`skipped` 已有清单、`failed` MinerU 报错、`rejected` 识别结果明显不全（见下）。整批可随时中断重跑，已完成的文件会跳过。
 
@@ -90,13 +97,19 @@ runtime/live/layout/<pdf sha256>/
 `config/settings.json`：
 
 ```json
-"pdf_layout": "auto"
+"pdf_layout": "auto",
+"mineru": {"python": "", "tier": "basic", "dpi": 200, "timeout_seconds": 900}
 ```
 
-- `auto`：有清单就用，没有就整页。
-- `off`：忽略清单，完全回到整页行为，不需要删任何文件。
+- `pdf_layout = auto`：有清单就用；没有就当场调 MinerU 生成；生成失败才整页兜底。
+- `pdf_layout = manifest`：只用已有清单，服务不调 MinerU。适合 MinerU 装在内网另一台机器、清单靠预跑同步过来的部署。
+- `pdf_layout = off`：忽略清单，完全回到整页行为，不需要删任何文件。
+
+`mineru.python` 留空时按 `MINERU_PYTHON`（可在 `.env.local` 写）→ `runtime/mineru-venv` → 当前解释器 的顺序找，并且会 `import mineru` 探活，探不到就当没装、走整页。`tier`、`dpi`、`timeout_seconds` 只影响服务自己生成的那一份清单。
 
 改完配置后重启服务才生效。
+
+判断这次到底走没走 MinerU，看该文件的事件流：有 `layout_prepared` 且 `pages>0` 就是按图裁的；`note` 会写明失败原因（大多数情况用"未找到可用的 MinerU 解释器"就能定位到 `mineru.python` 配错）。
 
 ## 六、性能与容量（本机实测）
 
@@ -126,4 +139,13 @@ MinerU 这轮识别明显不全（多为扫描质量差或公式版式异常）�
 MinerU 自己没识别出图注时不会凭空补。裁图仍然是有效证据，模型会直接读图。
 
 **导入后再改清单**
-已入库的证据是冻结的（含 hash 校验），重做清单不会改写历史；要重新走新清单，需删除该文件后重新上传。
+已入库的证据是冻结的（含 hash 校验），重做清单不会改写历史。文件还没入库（草稿/待审）时可以用脚本重建证据，不用重新上传：
+
+```powershell
+# 先看会动哪些文件，不写库
+python scripts/rebuild_evidence.py --data-dir runtime/live --all-unapproved
+# 确认后执行：清空该文件的证据与草稿，重新排队解析
+python scripts/rebuild_evidence.py --data-dir runtime/live --all-unapproved --apply
+```
+
+有已批准问答或已生效修订的文件会被跳过，脚本只打印原因。

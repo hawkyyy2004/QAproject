@@ -274,3 +274,15 @@ PDF分支语法树与基线一致；额外本地冷准备测量有波动：120�
 质量处理：上下堆叠、左右并列、网格面板合并为一张裁图，两组各自带图注的不合并；面板组缺图注时向上/下3%页高内继承“图/Fig/表/Table+编号”文字块并从正文移除；图内方程块并入图；公式框上下各加6pt留白；MinerU识别字符不到PDF文字层一半时拒写清单（整页兜底）。表注/HTML里的行内公式做`{ 2 1 0 }`→`{210}`紧凑化。
 
 实测（basic档、200 DPI、海洋学报5篇37页）：单篇86–171秒，89张裁图约6MB，识别27图/14表/51公式，仅1张MinerU自身未给图注；同批144 DPI整页渲染约25MB。新增5项测试（test_layout_manifest.py），全套自动测试通过。MinerU模型1.95GB不进git，`scripts/setup_mineru.py`建venv并预下载，模型源默认ModelScope。未改动生成、审核、修订、主题、提交与导出，未调用公司GLM。
+
+## 2026-10-26 v17 上传即自动拆图，不再要求预跑
+
+用户上传5篇后检查发现图文证据仍是整页截图。原因是v16只做了“离线预生成清单、在线读清单”，`runtime/live/layout`是空的，服务全部走整页兜底——功能没错，但默认路径没人触发。
+
+本轮把清单生成接进解析主链路：`parsers.extract`在`pdf_layout=auto`且无清单时调用`layout.prepare`，用本项目解释器（有PyMuPDF）起`scripts/mineru_layout.py`，`--mineru-python`指向MinerU venv。同一内容hash只做一次，重解析复用；解析期间界面显示“正在按版面拆图”，租约由`ExecutionLimits.parse`每10秒续期，90秒的MinerU不会让任务被抢走。解释器按`mineru.python`→`MINERU_PYTHON`→`runtime/mineru-venv`→当前解释器 寻找并`import mineru`探活，探不到即整页兜底并写`layout_prepared.note`。新增`pdf_layout=manifest`（只读不生成，给清单外送的部署用），`config/settings.json`增加`mineru{python,tier,dpi,timeout_seconds}`。
+
+新增`tests/conftest.py`把`layout.runner`桩成空实现：否则`auto`会真的发现本机venv，集成测试每篇多跑一到三分钟（第一次跑全量就是这样卡住的）。测试从237项全部通过，用时177秒。
+
+证据重建：`scripts/rebuild_evidence.py`（`--document`/`--all-unapproved`，默认只报告，`--apply`才写）专治“流程改了但文件已解析”。有已批准问答或生效修订的文件直接跳过，其余清空证据、草稿、主题、搜索词、图片后重新排队，不必让用户重传。
+
+实测：Zr-95那篇从14单元变62个（4张表裁图），Po-210那篇从54变92（5图/7公式/3表），裁图尺寸例如443×321px，原页595×842px，确认是区域裁图而非整页。COCTS、HY—1A两篇已入库，证据冻结不动。

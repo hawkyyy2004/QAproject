@@ -8,6 +8,7 @@ import pymupdf
 from qaproject.parsers import extract
 from qaproject.settings import settings
 from qaproject.store import Store
+from qaproject import layout as layout_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,8 +109,76 @@ def test_layout_can_be_disabled_or_ignored_when_stale(tmp_path):
     target2 = store2.root/'layout'/store2.document(doc2)['content_hash']
     target2.mkdir(parents=True)
     (target2/'manifest.json').write_text((target/'manifest.json').read_text(encoding='utf-8'), encoding='utf-8')
-    units2, _ = extract(store2, store2.document(doc2), settings())
+    units2, _ = extract(store2, store2.document(doc2), dict(settings(), pdf_layout='manifest'))
     assert all(u['evidence_kind'] != 'pdf_figure' for u in units2)
+
+
+def test_auto_builds_the_layout_when_no_manifest_exists(tmp_path, monkeypatch):
+    store = Store(tmp_path/'auto')
+    doc_id, _ = store.import_file('plot.pdf', graphics_pdf(), 'live')
+    doc = store.document(doc_id)
+    pages = [{'page': 1, 'blocks': [
+        {'kind': 'text', 'text': '观测期间表层叶绿素 a 平均 2.1 mg/m3。'},
+        {'kind': 'formula', 'bbox': [0.2, 0.3, 0.5, 0.32],
+         'path': 'crops/page-01-eq-01.png', 'latex': r'\Delta A = A(t_i)-A(t_0)'}]}]
+
+    def prepare(store, doc, config):
+        manifest_for(store, doc['id'], pages)
+        return layout_cache.load(store, doc['content_hash']), ''
+
+    monkeypatch.setattr('qaproject.parsers.layout_cache.prepare', prepare)
+    units, _ = extract(store, store.document(doc_id), settings())
+    assert [u['evidence_kind'] for u in units if u['image']] == ['pdf_formula']
+    assert units[0]['text'].startswith('观测期间')
+
+
+def test_auto_falls_back_when_mineru_is_unavailable(tmp_path, monkeypatch):
+    store = Store(tmp_path/'fallback')
+    doc_id, _ = store.import_file('plot.pdf', graphics_pdf(), 'live')
+    monkeypatch.setattr('qaproject.parsers.layout_cache.prepare', lambda *args: ({}, '未找到可用的 MinerU 解释器，保留整页'))
+    units, _ = extract(store, store.document(doc_id), settings())
+    assert any(u.get('evidence_kind') == 'pdf_page' for u in units)
+
+
+def rebuild_script():
+    spec = importlib.util.spec_from_file_location('rebuild_evidence', ROOT/'scripts/rebuild_evidence.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_rebuild_refuses_documents_with_committed_answers(tmp_path):
+    script = rebuild_script()
+    store = Store(tmp_path/'rebuild')
+    doc_id, _ = store.import_file('plot.pdf', graphics_pdf(), 'live')
+    with store.connect() as db:
+        db.execute("INSERT INTO candidates(id,document_id,unit_id,topic_id,row_json,row_hash,evidence_hash,"
+                   "fingerprint,status,review,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   ('c1', doc_id, 'u', None, '{}', 'h', 'e', 'f', 'approved', '{}', 0))
+    result = script.rebuild(store, doc_id, apply=True)
+    assert 'skipped' in result and '入库问答' in result['skipped']
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 1
+
+
+def test_rebuild_clears_draft_evidence_and_requeues(tmp_path):
+    script = rebuild_script()
+    store = Store(tmp_path/'reset')
+    doc_id, _ = store.import_file('plot.pdf', graphics_pdf(), 'live')
+    with store.connect() as db:
+        db.execute("UPDATE documents SET units=?, unit_count=1, status='waiting_review' WHERE id=?",
+                   (json.dumps([{'id': 'u1'}]), doc_id))
+        db.execute("UPDATE tasks SET status='waiting_review' WHERE document_id=?", (doc_id,))
+        db.execute("INSERT INTO candidates(id,document_id,unit_id,topic_id,row_json,row_hash,evidence_hash,"
+                   "fingerprint,status,review,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   ('c1', doc_id, 'u1', None, '{}', 'h', 'e', 'f', 'pending', '{}', 0))
+    assert script.rebuild(store, doc_id)['would_reset']
+    assert script.rebuild(store, doc_id, apply=True)['requeued']
+    doc = store.document(doc_id)
+    assert doc['units'] == [] and doc['status'] == 'queued'
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM candidates').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM tasks WHERE document_id=?', (doc_id,)).fetchone()[0] == 2
 
 
 def test_panels_and_inner_labels_group_into_single_figure():

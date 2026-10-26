@@ -82,6 +82,17 @@ def block_caption(block):
     return compact_math(' '.join(block_parts(block, 'caption')).strip())
 
 
+def caption_items(block):
+    """Captions with their own boxes: two figures on one page can share a block."""
+    out = []
+    for item in block.get('content') or []:
+        if isinstance(item, dict) and 'caption' in str(item.get('type', '')):
+            text = compact_math(flatten(item.get('content')).strip())
+            if text:
+                out.append((text, item.get('bbox')))
+    return out
+
+
 def block_html(block):
     for item in block.get('content') or []:
         if isinstance(item, dict) and item.get('type') == 'table_body':
@@ -139,15 +150,62 @@ def group_visuals(blocks):
                 vertical_gap(group['bbox'], box) <= GROUP_GAP
             side_by_side = overlap_y(group['bbox'], box) >= 0.5 and \
                 horizontal_gap(group['bbox'], box) <= H_GROUP_GAP
-            if (stacked or side_by_side) and not (group['caption'] and block_caption(block)):
+            if (stacked or side_by_side) and not (group['caption'] and block.get('_caption')):
                 group['members'].append(block)
                 group['bbox'] = merge(group['bbox'], box)
-                group['caption'] = group['caption'] or block_caption(block)
+                group['caption'] = group['caption'] or block.get('_caption', '')
                 break
         else:
             groups.append({'members': [block], 'bbox': list(block['bbox']),
-                           'caption': block_caption(block)})
+                           'caption': block.get('_caption', '')})
     return groups
+
+
+def assign_captions(blocks, texts):
+    """Give every visual and table its own 图/Fig line before any panel merging.
+
+    Panels of one figure share a single caption, so a block without one may be
+    merged into a captioned group. Two blocks that each own a caption are
+    different figures and must not be merged, which is why this runs first.
+    """
+    claimed, found = set(), {}
+    loose = []
+    for block in blocks:
+        items = caption_items(block)
+        placed = [(text, box) for text, box in items if box]
+        if placed:
+            loose.extend(placed)
+        elif items:
+            # Without geometry the caption can only belong to the block carrying it.
+            found[id(block)] = ' '.join(text for text, _ in items)
+    for text, box in loose:
+        nearest = None
+        for block in blocks:
+            below = vertical_gap(block['bbox'], box)
+            above = vertical_gap(box, block['bbox'])
+            offset = below if below >= 0 else (above if above >= 0 else 0)
+            if offset <= 0.03 and overlap_ratio(block['bbox'], box) >= 0.5:
+                if nearest is None or offset < nearest[0]:
+                    nearest = (offset, block)
+        if nearest:
+            found[id(nearest[1])] = ' '.join(filter(None, [found.get(id(nearest[1])), text]))
+    for block in blocks:
+        if id(block) in found:
+            continue
+        best = None
+        for text in texts:
+            if id(text) in claimed or not CAPTION.match(block_text(text)):
+                continue
+            below = vertical_gap(block['bbox'], text['bbox'])
+            above = vertical_gap(text['bbox'], block['bbox'])
+            offset = below if below >= 0 else (above if above >= 0 else 0)
+            if offset <= 0.03 and overlap_ratio(block['bbox'], text['bbox']) >= 0.5:
+                if best is None or offset < best[0]:
+                    best = (offset, text)
+        if best:
+            found[id(block)] = block_text(best[1])
+            claimed.add(id(best[1]))
+    return found, claimed
 
 
 def plan_page(blocks):
@@ -156,6 +214,9 @@ def plan_page(blocks):
     equations = [b for b in blocks if b.get('type') == 'equation']
     tables = [b for b in blocks if b.get('type') == 'table']
     texts = [b for b in blocks if b.get('type') in TEXT and len(block_text(b)) >= 2]
+    captions, claimed = assign_captions(visuals + tables, texts)
+    for block in visuals + tables:
+        block['_caption'] = captions.get(id(block), '')
     groups = group_visuals(visuals)
     loose = []
     for equation in equations:
@@ -169,7 +230,7 @@ def plan_page(blocks):
         else:
             loose.append(equation)
 
-    used = set()
+    used = set(claimed)
 
     def inherit_caption(box):
         """A panel group may lose its 图/Fig pair to neighbouring text blocks."""
@@ -186,7 +247,7 @@ def plan_page(blocks):
 
     items = []
     for group in groups:
-        caption = ' '.join(dict.fromkeys(c for c in (block_caption(b) for b in group['members']) if c))
+        caption = ' '.join(dict.fromkeys(c for c in (b.get('_caption', '') for b in group['members']) if c))
         if not caption:
             caption = inherit_caption(group['bbox'])
         kind = 'figure'
@@ -196,7 +257,7 @@ def plan_page(blocks):
         items.append({'kind': kind, 'bbox': group['bbox'], 'caption': caption,
                       'sort': (group['bbox'][1], group['bbox'][0])})
     for table in tables:
-        caption = block_caption(table) or inherit_caption(table['bbox'])
+        caption = table.get('_caption', '') or inherit_caption(table['bbox'])
         items.append({'kind': 'table', 'bbox': list(table['bbox']), 'caption': caption,
                       'html': block_html(table), 'sort': (table['bbox'][1], table['bbox'][0])})
     for equation in loose:

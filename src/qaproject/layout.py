@@ -8,9 +8,12 @@ a manifest keeps the previous whole-page behaviour, so MinerU stays optional.
 """
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 SCHEMA = 1
 KINDS = {'text', 'figure', 'table', 'formula', 'page'}
+_RUNNER = {}
 
 
 def manifest_path(store, content_hash):
@@ -54,3 +57,48 @@ def load(store, content_hash):
         if blocks:
             pages[page] = blocks
     return pages
+
+
+def runner(config):
+    """The MinerU interpreter: settings, then MINERU_PYTHON, then a local venv."""
+    block = config.get('mineru') or {}
+    explicit = str(block.get('python') or '').strip()
+    if not explicit:
+        from .settings import ROOT, local_setting
+        explicit = local_setting('MINERU_PYTHON')
+        if not explicit:
+            venv = ROOT / 'runtime/mineru-venv' / ('Scripts/python.exe' if sys.platform == 'win32'
+                                                   else 'bin/python')
+            explicit = str(venv) if venv.is_file() else sys.executable
+    if explicit not in _RUNNER:
+        # Probing costs about a second; a service restart re-probes.
+        probe = subprocess.run([explicit, '-c', 'import mineru'], capture_output=True, text=True)
+        _RUNNER[explicit] = probe.returncode == 0
+    return explicit if _RUNNER[explicit] else ''
+
+
+def prepare(store, doc, config):
+    """Build the manifest for this exact file so parsing can crop instead of page-shot.
+
+    Returns the page map, or {} when MinerU is unavailable or fails; the caller
+    then keeps the previous whole-page behaviour instead of failing the file.
+    """
+    block = config.get('mineru') or {}
+    python = runner(config)
+    if not python:
+        return {}, '未找到可用的 MinerU 解释器，保留整页'
+    script = Path(__file__).resolve().parents[2] / 'scripts/mineru_layout.py'
+    # The script needs this project's PyMuPDF to crop; only MinerU runs over there.
+    command = [sys.executable, str(script), str(doc['path']), '--layout-dir', str(Path(store.root) / 'layout'),
+               '--mineru-python', python, '--tier', str(block.get('tier') or 'basic'),
+               '--dpi', str(int(block.get('dpi') or 200)), '--jobs', '1']
+    try:
+        run = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                             errors='replace', timeout=int(block.get('timeout_seconds') or 900))
+    except subprocess.TimeoutExpired:
+        return {}, 'MinerU 超时，保留整页'
+    pages = load(store, doc.get('content_hash'))
+    if pages:
+        return pages, ''
+    detail = (run.stderr or run.stdout or '').strip().splitlines()
+    return {}, f'MinerU 未生成清单，保留整页：{detail[-1][:200] if detail else "无输出"}'

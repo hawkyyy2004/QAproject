@@ -29,19 +29,24 @@ def runtime_directory(explicit=None):
     return (path if path.is_absolute() else ROOT/path).resolve()
 
 
-def api_key():
-    """Read only the authorized credential variable; never evaluate shell code."""
+def local_setting(key):
+    """Read one per-machine value from .env.local; never evaluate shell code."""
     path = ROOT / '.env.local'
     if path.is_file():
         for line in path.read_text(encoding='utf-8-sig').splitlines():
             name, sep, value = line.strip().partition('=')
-            if sep and name == 'API_KEY':
+            if sep and name == key:
                 value = value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in '\"\'':
                     value = value[1:-1]
                 if value:
                     return value
-    return os.environ.get('API_KEY', '').strip()
+    return os.environ.get(key, '').strip()
+
+
+def api_key():
+    """Read only the authorized credential variable."""
+    return local_setting('API_KEY')
 
 
 def escaped(value):

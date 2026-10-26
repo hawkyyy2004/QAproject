@@ -10,6 +10,7 @@
   "max_pages": null,
   "max_file_mb": 25,
   "pdf_layout": "auto",
+  "mineru": {"python": "", "tier": "basic", "dpi": 200, "timeout_seconds": 900},
   "submission_mode": "human_review",
   "reasoning_effort": "low",
   "json_mode": true,
