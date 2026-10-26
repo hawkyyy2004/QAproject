@@ -165,6 +165,66 @@ def test_named_subject_is_not_rejected_by_keyword_alone():
     assert quality_flags({'input':'这些是什么？'})
 
 
+@pytest.mark.parametrize('still_duplicate', [True, False])
+def test_cross_document_hit_requires_rewrite_and_recheck(setup_pipeline, monkeypatch, still_duplicate):
+    _,store,_,_,_,behavior,cfg=setup_pipeline
+    cfg['target_per_document']=cfg['min_per_document']=1
+    cfg['semantic_search']=dict(cfg['semantic_search'],cross_document_dedup=True)
+    behavior['generation']=repair_answer
+    checked=[]
+
+    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold):
+        checked.extend(questions)
+        return {q:0.97 for q in questions if still_duplicate or '91' not in q}
+
+    monkeypatch.setattr('qaproject.pipeline.cross_document_duplicate', duplicates)
+    doc=run(setup_pipeline)
+    assert history(store,'pair_revision'), 'A cross-document veto must not use keyword-only re-review.'
+    assert any('91' in q for q in checked), 'Rewritten questions must be checked again.'
+    if still_duplicate:
+        assert doc['status']=='insufficient' and not doc['candidates'] and doc['qa_count']==0
+        with store.connect() as db:
+            drafts=[dict(r) for r in db.execute("SELECT * FROM candidates WHERE status='discarded'")]
+        assert drafts
+        assert all(any('与全库其他文档已入库问题高度相似' in flag
+                       for flag in json.loads(c['review'])['local_flags']) for c in drafts)
+        for c in drafts:
+            with pytest.raises(ValueError):
+                approve(store,c['id'],True,c['row_hash'])
+    else:
+        assert doc['status']=='waiting_review' and len(doc['candidates'])==2,doc['error']
+        assert all('91' in q for q in [c['row']['input'] for c in doc['candidates'] if c['row']['language']=='zh'])
+        for c in doc['candidates']:
+            assert c['status']=='pending' and not c['review'].get('local_flags')
+            approve(store,c['id'],True,c['row_hash'])
+        assert store.document(doc['id'])['qa_count']==2
+
+
+def test_keyword_rereview_cannot_bypass_current_cross_document_check(setup_pipeline, monkeypatch):
+    app,store,doc_id,worker,_,_,cfg=setup_pipeline
+    cfg['target_per_document']=cfg['min_per_document']=1
+    doc=run(setup_pipeline)
+    with store.connect() as db:
+        for c in doc['candidates']:
+            old=dict(c['review'],local_flags=['问题可能依赖未定义指代，需要写明对象和范围。'])
+            db.execute("UPDATE candidates SET status='needs_review',review=? WHERE id=?",(encode(old),c['id']))
+    checked=[]
+
+    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold):
+        checked.extend(questions)
+        return {q:0.97 for q in questions}
+
+    monkeypatch.setattr('qaproject.pipeline.cross_document_duplicate', duplicates)
+    cfg['semantic_search']=dict(cfg['semantic_search'],cross_document_dedup=True)
+    client=TestClient(app)
+    headers={'X-QA-Session':client.get('/api/bootstrap').json()['session']}
+    assert client.post('/api/documents/'+doc_id+'/optimize',headers=headers).status_code==200
+    worker.process(store.claim(worker.name,document_id=doc_id))
+    latest=store.document(doc_id)
+    assert checked and latest['qa_count']==0 and not latest['candidates']
+    assert history(store,'pair_revision')
+
+
 def test_preflight_still_blocks_changed_original(setup_pipeline):
     _,store,doc_id,_,_,behavior,cfg=setup_pipeline
     cfg['target_per_document']=cfg['min_per_document']=1

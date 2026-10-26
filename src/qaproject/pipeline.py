@@ -21,6 +21,7 @@ from .source_files import verify_reference
 
 CHECKS = ['supported', 'independent', 'scope_correct', 'knowledge_value', 'distinct', 'topic_correct']
 BILINGUAL_CHECKS = ['language_correct', 'translation_consistent']
+CROSS_DOCUMENT_DUPLICATE_FLAG = '与全库其他文档已入库问题高度相似'
 
 
 def quality_flags(row):
@@ -579,7 +580,9 @@ class Worker:
             checks = result.get('checks', [])
             if not isinstance(checks, list):
                 raise ValueError('审核响应结构无效。')
-            dedup_cfg = None if repairing else (settings().get('semantic_search') or {}).get('cross_document_dedup')
+            # A semantic re-review or rewritten question must satisfy the same
+            # cross-document check as a newly generated question.
+            dedup_cfg = (settings().get('semantic_search') or {}).get('cross_document_dedup')
             duplicates = None
             if dedup_cfg:
                 dedup = settings().get('semantic_search') or {}
@@ -624,7 +627,7 @@ class Worker:
                     zh = next((v['qa']['input'] for v in candidate['versions'] if v['qa']['language']=='zh'), None)
                     similarity = duplicates.get(zh) if zh else None
                     if similarity is not None:
-                        flags.append(f'与全库其他文档已入库问题高度相似（相似度 {similarity:.2f}），需人工确认是否跨文档重复。')
+                        flags.append(f'{CROSS_DOCUMENT_DUPLICATE_FLAG}（相似度 {similarity:.2f}），需修订考点并重新查重，暂不可入库。')
                 if flags:
                     check['local_flags'] = flags
                     check['note'] = '；'.join([str(check.get('note','')),*flags])
@@ -662,6 +665,7 @@ class Worker:
                     topic = next(t for t in [*latest['topics'],*latest.get('historical_topics',[])] if t['id']==versions[0]['topic_id'])
                     previous = versions[0]['review']
                     if (previous.get('local_flags') and all(previous.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
+                            and not any(CROSS_DOCUMENT_DUPLICATE_FLAG in str(flag) for flag in previous['local_flags'])
                             and not any(quality_flags(c['row']) for c in versions)
                             and not review_note_flags(previous.get('note',''))):
                         # A previous keyword-only veto can be resolved by one semantic review,
