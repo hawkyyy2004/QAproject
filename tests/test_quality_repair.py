@@ -173,7 +173,7 @@ def test_cross_document_hit_requires_rewrite_and_recheck(setup_pipeline, monkeyp
     behavior['generation']=repair_answer
     checked=[]
 
-    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold):
+    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold, **kwargs):
         checked.extend(questions)
         return {q:0.97 for q in questions if still_duplicate or '91' not in q}
 
@@ -210,7 +210,7 @@ def test_keyword_rereview_cannot_bypass_current_cross_document_check(setup_pipel
             db.execute("UPDATE candidates SET status='needs_review',review=? WHERE id=?",(encode(old),c['id']))
     checked=[]
 
-    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold):
+    def duplicates(store, model_dir, model_id, cache, document_id, questions, threshold, **kwargs):
         checked.extend(questions)
         return {q:0.97 for q in questions}
 

@@ -7,6 +7,9 @@ from test_document_topics import evidence, proposal
 
 
 def test_independent_categories_reuse_across_files_without_extra_requests(tmp_path, monkeypatch):
+    # This taxonomy fixture intentionally repeats synthetic questions across files;
+    # semantic duplicate behavior has separate tests and must not load a real model.
+    monkeypatch.setattr('qaproject.pipeline.cross_document_duplicate',lambda *a,**kw:{})
     store = Store(tmp_path/'live')
     samples = [
         ([evidence(1,'锂电池的聚合物电解质合成记录，测试温度15摄氏度。'),

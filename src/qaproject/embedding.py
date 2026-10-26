@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from .semantic import cache_connection, topic_text
+from .semantic import cache_connection, topic_text, init_cache, vector_values
 from .store import digest
 from .settings import ROOT
 
@@ -53,6 +53,7 @@ class LocalEmbedder:
 
 def build_index(job, encoder_factory=LocalEmbedder):
     import numpy as np
+    init_cache(job['cache'])
     model_id, catalog = job['model_id'], job['catalog']
     topics, queries = job['topics'], job['queries']
     texts = [topic_text(t) for t in topics] + [q['text'] for q in queries]
@@ -123,14 +124,15 @@ def encode_only():
     """
     job_path = Path(sys.argv[1])
     job = json.loads(job_path.read_text(encoding='utf-8'))
+    init_cache(job['cache'])
     texts = job['texts']
     hashes = [digest([job['model_id'], text]) for text in texts]
     result = {}
     missing = []
     with cache_connection(job['cache']) as db:
         for text, h in zip(texts, hashes):
-            row = db.execute('SELECT vector FROM vectors WHERE hash=?', (h,)).fetchone()
-            if row and len(row['vector']) == 512 * 4:
+            row = db.execute('SELECT vector FROM qa_vectors WHERE hash=?', (h,)).fetchone()
+            if row and vector_values(row['vector']) is not None:
                 result[h] = row['vector'].hex()
             else:
                 missing.append((text, h))
@@ -142,7 +144,7 @@ def encode_only():
             encoded = encoder.encode([text for text, _ in batch])
             with cache_connection(job['cache']) as db:
                 for (text, h), vector in zip(batch, encoded):
-                    db.execute('INSERT OR REPLACE INTO vectors VALUES(?,?)', (h, vector.astype('<f4').tobytes()))
+                    db.execute('INSERT OR REPLACE INTO qa_vectors VALUES(?,?)', (h, vector.astype('<f4').tobytes()))
                     vectors[h] = vector
         del encoder
         result.update({h: v.astype('<f4').tobytes().hex() for h, v in vectors.items()})

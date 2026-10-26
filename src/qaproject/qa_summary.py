@@ -104,9 +104,10 @@ def queue_revision(store, qa_id, versions, expected_edit_version=None):
     return {'revision_id':revision_id,'status':'queued'}
 
 
-def process_revision(store, task, worker, call):
+def process_revision(store, task, worker, call, check_duplicates):
     from .pipeline import (assert_lease, approve, review_groups, review_binding, compact_units,
-                           CHECKS, BILINGUAL_CHECKS, REVIEW, quality_flags, review_note_flags, validate_row)
+                           CHECKS, BILINGUAL_CHECKS, REVIEW, quality_flags, review_note_flags, validate_row,
+                           CROSS_DOCUMENT_DUPLICATE_FLAG)
     started = time.perf_counter()
     revision_id = task['revision_id']
     check = {}
@@ -138,6 +139,9 @@ def process_revision(store, task, worker, call):
         check = {k:checks[0].get(k) for k in CHECKS+BILINGUAL_CHECKS+['note']}
         check['binding'] = review_binding(group,unit)
         check['local_flags'] = list(dict.fromkeys([f for c in candidates for f in quality_flags(c['row'])]+review_note_flags(check.get('note',''))))
+        duplicates = check_duplicates([c['row']['input'] for c in candidates if c['row']['language']=='zh'])
+        if duplicates:
+            check['local_flags'].append(f'{CROSS_DOCUMENT_DUPLICATE_FLAG}（相似度 {max(duplicates.values()):.2f}），本次修改未通过，保留正式原版。')
         passed = (all(check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
                   and isinstance(check['note'],str) and bool(check['note'].strip()) and not check['local_flags'])
         with store.connect() as db:

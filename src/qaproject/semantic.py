@@ -43,11 +43,19 @@ def cache_connection(path):
         db.close()
 
 
+_cache_init_lock = threading.Lock()
+
+
 def init_cache(path):
-    with cache_connection(path) as db:
+    with _cache_init_lock, cache_connection(path) as db:
+        if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state'").fetchone()
+                and db.execute("SELECT 1 FROM state WHERE key='qa_vectors_migrated'").fetchone()):
+            return
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
           CREATE TABLE IF NOT EXISTS vectors(
+            hash TEXT PRIMARY KEY, vector BLOB NOT NULL);
+          CREATE TABLE IF NOT EXISTS qa_vectors(
             hash TEXT PRIMARY KEY, vector BLOB NOT NULL);
           CREATE TABLE IF NOT EXISTS rankings(
             key TEXT, catalog TEXT, scores BLOB NOT NULL,
@@ -59,6 +67,12 @@ def init_cache(path):
             id INTEGER PRIMARY KEY, created REAL, seconds REAL,
             status TEXT, error_type TEXT);
         ''')
+        # Preserve pre-upgrade QA caches before topic indexing can delete them.
+        # Old rows have no owner metadata; copy once, without reading business data.
+        db.execute('BEGIN IMMEDIATE')
+        if not db.execute("SELECT 1 FROM state WHERE key='qa_vectors_migrated'").fetchone():
+            db.execute('INSERT OR IGNORE INTO qa_vectors SELECT * FROM vectors')
+            db.execute("INSERT INTO state VALUES('qa_vectors_migrated','1')")
 
 
 def matching_topic_ids(store, topics, query):
@@ -252,71 +266,106 @@ class SearchCoordinator:
                 self.stop.wait(3)
 
 
-def encode_texts(model_dir, model_id, cache, texts, timeout=30):
-    """Embeddings for several texts via one encode-only child; None when unavailable.
+class DedupUnavailable(ValueError):
+    """A failed check must never masquerade as an empty duplicate result."""
 
-    Vectors persist in the shared cache, so only unseen texts pay model cost.
-    """
-    if not all((Path(model_dir) / f).is_file() for f in ('model.onnx', 'tokenizer.json')):
+    def __init__(self, reason='incomplete'):
+        self.reason = reason
+        super().__init__('跨文档查重未完成：请检查本地向量模型及缓存目录，或重试继续补算；本次未放行。')
+
+
+def vector_values(raw):
+    """Validate cached/child vectors without importing the model runtime."""
+    if not isinstance(raw, bytes) or len(raw) != 512 * 4:
         return None
+    import numpy as np
+    values = np.frombuffer(raw, dtype='<f4')
+    if not np.isfinite(values).all() or abs(float(values @ values)-1) > .02:
+        return None
+    return values
+
+
+def encode_texts(model_dir, model_id, cache, texts, timeout=None, check=None):
+    """Read QA cache first; encode only missing texts in recoverable bounded jobs."""
     texts = list(dict.fromkeys(t for t in texts if t and t.strip()))
     if not texts:
         return {}
-    job_path = Path(cache).parent / ('dedup-job-'+uid()+'.json')
-    job = {'model_dir': str(model_dir), 'model_id': model_id, 'cache': str(cache), 'texts': texts}
-    job_path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
+    init_cache(cache)
+    result = {}
+    with cache_connection(cache) as db:
+        for text in texts:
+            row = db.execute('SELECT vector FROM qa_vectors WHERE hash=?', (digest([model_id, text]),)).fetchone()
+            values = vector_values(row['vector']) if row else None
+            if values is not None:
+                result[text] = values
+    missing = [text for text in texts if text not in result]
+    if missing and not all((Path(model_dir) / f).is_file() for f in ('model.onnx', 'tokenizer.json')):
+        raise DedupUnavailable('model_missing')
     env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
            'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
            'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
-    try:
-        done = subprocess.run([sys.executable, '-m', 'qaproject.embedding', str(job_path), 'encode-only'],
-                              env=env, cwd=ROOT, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
-        if done.returncode != 0:
-            return None
-        vectors = json.loads(job_path.read_text(encoding='utf-8')).get('vectors', {})
-    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
-        return None
-    finally:
-        job_path.unlink(missing_ok=True)
-    result = {}
-    for text in texts:
-        raw = vectors.get(digest([model_id, text]))
-        if raw:
-            result[text] = struct.unpack('<512f', bytes.fromhex(raw))
+    for start in range(0, len(missing), 256):
+        if check:
+            check()
+        batch = missing[start:start+256]
+        job_path = Path(cache).parent / ('dedup-job-'+uid()+'.json')
+        job = {'model_dir': str(model_dir), 'model_id': model_id, 'cache': str(cache), 'texts': batch}
+        job_path.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
+        try:
+            done = subprocess.run([sys.executable, '-m', 'qaproject.embedding', str(job_path), 'encode-only'],
+                                  env=env, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=timeout if timeout is not None else max(30, len(batch)*.2))
+            if done.returncode != 0:
+                raise DedupUnavailable('encoder_failed')
+            vectors = json.loads(job_path.read_text(encoding='utf-8')).get('vectors', {})
+            if not isinstance(vectors, dict):
+                raise DedupUnavailable('invalid_result')
+            for text in batch:
+                raw = vectors.get(digest([model_id, text]))
+                values = vector_values(bytes.fromhex(raw)) if isinstance(raw, str) else None
+                if values is None:
+                    raise DedupUnavailable('invalid_vector')
+                result[text] = values
+        except DedupUnavailable:
+            raise
+        except subprocess.TimeoutExpired:
+            raise DedupUnavailable('timeout') from None
+        except OSError:
+            raise DedupUnavailable('encoder_io') from None
+        except (ValueError, AttributeError):
+            raise DedupUnavailable('invalid_result') from None
+        finally:
+            job_path.unlink(missing_ok=True)
+    if check:
+        check()
     return result
 
 
-def cross_document_duplicate(store, model_dir, model_id, cache, document_id, questions, threshold):
-    """Max cosine similarity of zh questions against approved zh questions of other documents.
-
-    Returns {question: max_similarity}; missing entries mean unavailable or no reference.
-    """
+def cross_document_duplicate(store, model_dir, model_id, cache, document_id, questions, threshold, check=None):
+    """Check all other documents' approved Chinese questions; None means incomplete."""
     import numpy as np
-    vectors = encode_texts(model_dir, model_id, cache, questions)
-    if vectors is None:
-        return None
     with store.connect() as db:
         rows = db.execute('''SELECT q.row_json FROM qas q JOIN candidates c ON c.id=q.id
             WHERE c.status='approved' AND c.document_id!=? AND json_extract(q.row_json,'$.language')='zh' ''',
             (document_id,)).fetchall()
     reference = list(dict.fromkeys(json.loads(r['row_json']).get('input','') for r in rows))
-    reference = [q for q in reference if q and q not in questions]
-    result = {}
-    if not reference:
+    reference = [q for q in reference if q and q.strip()]
+    if not reference or not questions:
+        return {}
+    exact = set(reference).intersection(questions)
+    result = {q:1.0 for q in exact}
+    remaining = list(dict.fromkeys(q for q in questions if q not in exact))
+    if not remaining:
         return result
-    reference_vectors = encode_texts(model_dir, model_id, cache, reference)
-    if reference_vectors is None:
-        return result
-    reference_vectors = {q: v for q, v in reference_vectors.items() if v is not None}
-    if not reference_vectors:
-        return result
-    matrix = np.stack(list(reference_vectors.values()))
-    for question in questions:
-        vector = vectors.get(question)
-        if vector is None:
-            continue
-        scores = matrix @ np.asarray(vector, dtype='<f4')
+    vectors = encode_texts(model_dir, model_id, cache, [*remaining, *reference], check=check)
+    if vectors is None or any(q not in vectors for q in [*remaining, *reference]):
+        return None
+    matrix = np.asarray([vectors[q] for q in reference], dtype='<f4')
+    for question in remaining:
+        if check:
+            check()
+        scores = matrix @ np.asarray(vectors[question], dtype='<f4')
         best = float(scores.max()) if scores.size else 0.0
         if best >= threshold:
             result[question] = best

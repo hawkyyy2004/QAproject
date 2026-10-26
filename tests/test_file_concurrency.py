@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
 import json
+import struct
 from pathlib import Path
 import threading
 import time
@@ -459,7 +460,7 @@ def test_cross_document_embedding_jobs_use_distinct_files(tmp_path,monkeypatch):
         paths.append(path)
         barrier.wait(timeout=3)
         job = json.loads(path.read_text())
-        job['vectors'] = {digest(['test',text]):(b'\x00'*2048).hex() for text in job['texts']}
+        job['vectors'] = {digest(['test',text]):struct.pack('<512f', 1., *([0.]*511)).hex() for text in job['texts']}
         path.write_text(encode(job))
         return type('Result',(),{'returncode':0})()
     monkeypatch.setattr('qaproject.semantic.subprocess.run',run)

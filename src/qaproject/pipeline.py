@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REVIEW_SKEPTIC, REPAIR
 from .parsers import extract, text_alternatives, model_text, text_view_matches
-from .semantic import cross_document_duplicate
+from .semantic import cross_document_duplicate, DedupUnavailable
 from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog
 from .settings import MAX_DOCUMENT_TOPICS
@@ -374,6 +374,41 @@ class Worker:
             store.task_update(task['id'], self.name, name)
             store.update_document(doc['id'], status=name, error='', progress=progress)
 
+        def check_duplicates(questions):
+            dedup = config.get('semantic_search') or {}
+            if not dedup.get('cross_document_dedup') or not questions:
+                return {}
+            check_started = time.perf_counter()
+            def checkpoint():
+                self.limits.check(self.stop)
+                store.task_update(task['id'], self.name, 'cross_dedup')
+            checkpoint()
+            # Both generation and manual edits share one local CPU encoder slot.
+            while not self.limits.local_embedding.acquire(timeout=.25):
+                checkpoint()
+            try:
+                spec = json.loads((ROOT/'config/embedding-model.json').read_text())
+                model_id = digest([dedup.get('model_id','bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
+                duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
+                    model_id, store.root/'search.sqlite3', doc['id'], questions,
+                    float(dedup.get('dedup_threshold', .93)), check=checkpoint)
+                if duplicates is None:
+                    raise DedupUnavailable()
+                store.event(doc['id'], 'cross_dedup_complete', {'run_id':run_id,'stage':'cross_dedup',
+                    'seconds':round(time.perf_counter()-check_started,3),'questions':len(questions),
+                    'duplicates':len(duplicates),'finish_reason':'complete'})
+                return duplicates
+            except WorkInterrupted:
+                raise
+            except Exception as error:
+                store.event(doc['id'], 'cross_dedup_unavailable', {'run_id':run_id,
+                    'stage':'cross_dedup','error_type':type(error).__name__,
+                    'seconds':round(time.perf_counter()-check_started,3),
+                    'finish_reason':getattr(error,'reason','incomplete')})
+                raise DedupUnavailable(getattr(error,'reason','incomplete')) from None
+            finally:
+                self.limits.local_embedding.release()
+
         def call_cached(kind, instruction, payload, group):
             self.limits.check(self.stop)
             store.task_update(task['id'], self.name, kind)
@@ -582,24 +617,28 @@ class Worker:
                 raise ValueError('审核响应结构无效。')
             # A semantic re-review or rewritten question must satisfy the same
             # cross-document check as a newly generated question.
-            dedup_cfg = (settings().get('semantic_search') or {}).get('cross_document_dedup')
-            duplicates = None
-            if dedup_cfg:
-                dedup = settings().get('semantic_search') or {}
-                spec = json.loads((ROOT/'config/embedding-model.json').read_text())
-                model_id = digest([dedup.get('model_id','bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
-                try:
-                    with self.limits.local_embedding:
-                        self.limits.check(self.stop)
-                        duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
-                            model_id, store.root/'search.sqlite3', doc['id'],
-                            [v['qa']['input'] for c in candidates for v in c['versions'] if v['qa']['language']=='zh'],
-                            float(dedup.get('dedup_threshold', 0.93)))
-                except WorkInterrupted:
-                    raise
-                except Exception:
-                    duplicates = None
-                    store.event(doc['id'], 'cross_dedup_unavailable', {'run_id':run_id})
+            try:
+                duplicates = check_duplicates([v['qa']['input'] for c in candidates
+                                               for v in c['versions'] if v['qa']['language']=='zh'])
+            except DedupUnavailable as error:
+                # A failed re-review must not leave a previously passing draft
+                # available to a stale client while the file reports a failure.
+                with store.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    assert_lease(db,task['id'],self.name)
+                    for candidate in candidates:
+                        for version in candidate['versions']:
+                            current = db.execute('SELECT status,review FROM candidates WHERE id=? AND row_hash=?',
+                                (version['candidate_id'],digest(version['qa']))).fetchone()
+                            if not current or current['status'] in ('approved','rejected','discarded'):
+                                continue
+                            store_review = encode({'note':str(error),'local_flags':['跨文档查重未完成，不能入库。']})
+                            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc['id'],'review_replaced',
+                                encode({'candidate_id':version['candidate_id'],'previous_review':json.loads(current['review']),
+                                        'row_hash':digest(version['qa']),'run_id':run_id}),time.time()))
+                            db.execute("UPDATE candidates SET status='needs_review',review=? WHERE id=?",
+                                (store_review,version['candidate_id']))
+                raise
             for candidate in candidates:
                 returned = next((c for c in checks if isinstance(c,dict) and c.get('candidate_id')==candidate['candidate_id']), {})
                 check = {k:returned.get(k) for k in CHECKS+BILINGUAL_CHECKS+['note']}
@@ -772,7 +811,7 @@ class Worker:
             if task.get('revision_id'):
                 from .qa_summary import process_revision
                 current_stage = 'qa_revision_review'
-                process_revision(store,task,self.name,call_cached)
+                process_revision(store,task,self.name,call_cached,check_duplicates)
                 return
             if doc.get('source_kind')=='library':
                 current_stage = 'source_validation'
