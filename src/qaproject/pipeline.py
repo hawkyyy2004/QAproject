@@ -14,7 +14,7 @@ from .semantic import cross_document_duplicate
 from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog
 from .settings import MAX_DOCUMENT_TOPICS
-from .taxonomy import TopicSelection
+from .taxonomy import TopicSelection, visual_topic_support
 from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
 from .execution import DEFAULT_LIMITS, WorkInterrupted
 from .source_files import verify_reference
@@ -935,6 +935,18 @@ class Worker:
                         payload = dict(payload, automatic_regeneration='直接重新生成一份完整合法的1至5个概括主题及历史来源映射；不要列更多主题供挑选。',
                                        validation_feedback=str(error))
             doc = store.document(doc['id'])
+            attached = visual_topic_support(doc['topics'], units)
+            if attached:
+                # Generation only offers evidence that belongs to a topic, so an
+                # unclaimed figure can never be asked about (issue: crops arrived
+                # but every image QA group was skipped).
+                for topic in doc['topics']:
+                    extra = sorted(attached.get(topic['id'], set()) - set(topic['unit_ids']))
+                    if extra:
+                        store.link_topic(doc['id'], topic['id'], [], extra)
+                        store.event(doc['id'], 'visual_topic_support',
+                                    {'topic': topic['name'], 'units': len(extra)})
+                doc = store.document(doc['id'])
             if force_reclassification and doc['candidates']:
                 save_timing()
                 store.update_document(doc['id'],status='waiting_review',progress=f'系统已自动归纳为{len(doc["topics"])}个整篇正式主题',

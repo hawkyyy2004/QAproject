@@ -140,6 +140,22 @@ def test_auto_falls_back_when_mineru_is_unavailable(tmp_path, monkeypatch):
     assert any(u.get('evidence_kind') == 'pdf_page' for u in units)
 
 
+def test_cropped_figures_join_the_topic_that_owns_their_page():
+    from qaproject.taxonomy import visual_topic_support
+    units = [{'id': 't1', 'image': '', 'page': 1}, {'id': 't2', 'image': '', 'page': 2},
+             {'id': 't3', 'image': '', 'page': 2}, {'id': 'f1', 'image': 'a.png', 'page': 1},
+             {'id': 'f2', 'image': 'b.png', 'page': 2}, {'id': 'f3', 'image': 'c.png', 'page': 9}]
+    topics = [{'id': 'A', 'unit_ids': ['t1']}, {'id': 'B', 'unit_ids': ['t2', 't3']}]
+    claims = visual_topic_support(topics, units)
+    assert claims == {'A': {'f1'}, 'B': {'f2', 'f3'}}
+
+
+def test_text_only_documents_claim_no_visual_units():
+    from qaproject.taxonomy import visual_topic_support
+    units = [{'id': 't1', 'image': '', 'page': 1}]
+    assert visual_topic_support([{'id': 'A', 'unit_ids': ['t1']}], units) == {}
+
+
 def rebuild_script():
     spec = importlib.util.spec_from_file_location('rebuild_evidence', ROOT/'scripts/rebuild_evidence.py')
     module = importlib.util.module_from_spec(spec)

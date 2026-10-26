@@ -4,6 +4,41 @@ from .settings import MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS
 from .parsers import text_view_matches
 
 
+def visual_topic_support(topics, units):
+    """Return {topic_id: unit_ids} for figures, tables and formulas.
+
+    MinerU turns every figure into its own evidence unit, while the model only
+    cites body text when it names a topic's supporting units. Without this
+    mapping no image unit belongs to any topic, so visual generation is skipped
+    for the whole document. A figure belongs to whichever topic owns the body
+    text of its page; a page with no text at all borrows the nearest page.
+    """
+    text_by_page, holders = {}, {}
+    for unit in units:
+        if unit['image']:
+            continue
+        text_by_page.setdefault(unit.get('page'), []).append(unit['id'])
+    for topic in topics:
+        for unit_id in topic['unit_ids']:
+            holders.setdefault(unit_id, set()).add(topic['id'])
+    pages = sorted(page for page in text_by_page if isinstance(page, int))
+    claims = {}
+    for unit in units:
+        if not unit['image']:
+            continue
+        page = unit.get('page')
+        if page not in text_by_page and pages:
+            origin = page if isinstance(page, int) else pages[0]
+            page = min(pages, key=lambda candidate: (abs(candidate - origin), candidate))
+        votes = {}
+        for unit_id in text_by_page.get(page, []):
+            for topic_id in holders.get(unit_id, ()):
+                votes[topic_id] = votes.get(topic_id, 0) + 1
+        if votes:
+            claims.setdefault(max(votes, key=votes.get), set()).add(unit['id'])
+    return claims
+
+
 class TopicSelection:
     def __init__(self, known_topics, units):
         self.known = {normalized(name): t for t in known_topics for name in [t['name'], *t['aliases']]}
