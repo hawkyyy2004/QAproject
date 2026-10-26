@@ -1,10 +1,12 @@
 import csv
 import io
+import shutil
 from pathlib import Path
 import re
 
 import pymupdf
 
+from . import layout as layout_cache
 from .store import digest
 
 LONG_TEXT_THRESHOLD = 16000
@@ -120,6 +122,9 @@ def text_alternatives(units):
     return result
 
 
+LAYOUT_PLACEHOLDER = 'Figure evidence. Read the actual cropped image; its caption is below.'
+
+
 def extract(store, doc, config, progress=None):
     path = Path(doc['path'])
     folder = store.root / 'assets/images' / doc['id']
@@ -127,7 +132,7 @@ def extract(store, doc, config, progress=None):
     units = []
     seg_offsets = {}
 
-    def add(text, page, seg, image='', asset_id='', locator=None, **metadata):
+    def add(text, page, seg, image='', asset_id='', locator=None, unit_id=None, **metadata):
         spans = [(0,len(text))] if image else list(text_spans(text))
         offset = seg_offsets.get(page, 0)
         for index, (start,end) in enumerate(spans):
@@ -138,7 +143,8 @@ def extract(store, doc, config, progress=None):
             elif locator and len(spans)>1:
                 actual_locator += f'-seg-{index+1:02d}'
             part = text[start:end]
-            unit = {'id': f'{doc["id"]}:p{page}:s{actual_seg}', 'text': part, 'page': page, 'seg': actual_seg,
+            actual_id = f'{unit_id}:{index+1}' if unit_id and len(spans) > 1 else unit_id
+            unit = {'id': actual_id or f'{doc["id"]}:p{page}:s{actual_seg}', 'text': part, 'page': page, 'seg': actual_seg,
                     'locator': actual_locator, 'image': image, 'asset_id': asset_id,
                     'language': 'zh' if re.search('[\u4e00-\u9fff]', part) else 'en', **metadata}
             if len(spans)>1:
@@ -157,7 +163,51 @@ def extract(store, doc, config, progress=None):
                 raise ValueError(f'当前配置每份最多 {max_pages} 页，未截断处理。')
             if progress:
                 progress(0, len(pdf))
+            # MinerU layout, when frozen for this exact file, replaces page rendering:
+            # body text stays text, and every figure/table/formula is its own crop.
+            frozen = (layout_cache.load(store, doc.get('content_hash'))
+                      if str(config.get('pdf_layout', 'auto')).lower() != 'off' else {})
+            labels = {'figure': '图片', 'table': '表格', 'formula': '公式', 'page': '整页扫描'}
+            prefixes = {'figure': 'fig', 'table': 'tbl', 'formula': 'eq', 'page': 'page'}
+
+            def layout_page(n, blocks):
+                counts = dict.fromkeys(prefixes, 0)
+                seg = 0
+                for block in blocks:
+                    kind = block['kind']
+                    if kind == 'text':
+                        for paragraph in pdf_paragraphs(block['text']):
+                            seg += 1
+                            add(paragraph, n, seg, evidence_kind='extracted_text')
+                        continue
+                    counts[kind] += 1
+                    index = counts[kind]
+                    # Copy into evidence storage so the layout cache stays disposable.
+                    out = folder / f'page-{n:04d}-{prefixes[kind]}-{index:02d}.png'
+                    shutil.copyfile(block['path'], out)
+                    asset = store.add_asset(doc['id'], out, n, f'第 {n} 页{labels[kind]}')
+                    caption, html = block.get('caption') or '', block.get('html') or ''
+                    if kind == 'table':
+                        text = '\n\n'.join(part for part in (caption, html) if part)
+                    elif kind == 'formula':
+                        text = block.get('latex') or caption
+                    else:
+                        text = caption
+                    offset = seg_offsets.get(n, 0)
+                    add(text or LAYOUT_PLACEHOLDER, n, 1, str(out), asset,
+                        locator=f'page-{n:02d}-{prefixes[kind]}-{index:02d}',
+                        unit_id=f'{doc["id"]}:p{n}:{prefixes[kind]}{index}',
+                        evidence_kind='pdf_page' if kind == 'page' else f'pdf_{kind}',
+                        bbox=block.get('bbox'))
+                    # Visual units do not consume the paragraph counter.
+                    seg_offsets[n] = offset
+
             for n, page in enumerate(pdf, 1):
+                if frozen.get(n):
+                    layout_page(n, frozen[n])
+                    if progress and (n % 10 == 0 or n == len(pdf)):
+                        progress(n, len(pdf))
+                    continue
                 visual = has_full_page_image(page)
                 flags = pymupdf.TEXTFLAGS_TEXT | (0 if visual else pymupdf.TEXT_PRESERVE_IMAGES)
                 textpage = page.get_textpage(flags=flags)

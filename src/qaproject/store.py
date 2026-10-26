@@ -90,7 +90,7 @@ def _append_search_terms(topics, terms):
 class Store:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        for name in ['originals', 'assets/images', 'runs', 'exports']:
+        for name in ['originals', 'assets/images', 'runs', 'exports', 'layout']:
             (self.root / name).mkdir(parents=True, exist_ok=True)
         self.db = self.root / 'state.sqlite3'
         with self.connect() as db:

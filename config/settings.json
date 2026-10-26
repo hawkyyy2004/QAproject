@@ -9,6 +9,7 @@
   "min_per_document": 5,
   "max_pages": null,
   "max_file_mb": 25,
+  "pdf_layout": "auto",
   "submission_mode": "human_review",
   "reasoning_effort": "low",
   "json_mode": true,
