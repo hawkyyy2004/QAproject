@@ -13,6 +13,7 @@ import time
 
 from .settings import ROOT, settings
 from .store import digest, normalized, uid
+from .sqlite_support import initialize_journal, journal_mode
 
 
 def active_topics(store):
@@ -44,14 +45,19 @@ def cache_connection(path):
 
 
 _cache_init_lock = threading.Lock()
+_cache_journals = set()
 
 
 def init_cache(path):
     with _cache_init_lock, cache_connection(path) as db:
-        if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state'").fetchone()
-                and db.execute("SELECT 1 FROM state WHERE key='qa_vectors_migrated'").fetchone()):
+        key = (str(Path(path).resolve()), journal_mode())
+        ready = (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state'").fetchone()
+                 and db.execute("SELECT 1 FROM state WHERE key='qa_vectors_migrated'").fetchone())
+        if key not in _cache_journals or not ready:
+            initialize_journal(db, key[1])
+            _cache_journals.add(key)
+        if ready:
             return
-        db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
           CREATE TABLE IF NOT EXISTS vectors(
             hash TEXT PRIMARY KEY, vector BLOB NOT NULL);
@@ -214,6 +220,7 @@ class SearchCoordinator:
         timed_out = False
         # Do not pass company credentials or user shell variables to the model process.
         env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
+               'QA_SQLITE_JOURNAL_MODE': journal_mode(),
                'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
                'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
         try:
@@ -302,6 +309,7 @@ def encode_texts(model_dir, model_id, cache, texts, timeout=None, check=None):
     if missing and not all((Path(model_dir) / f).is_file() for f in ('model.onnx', 'tokenizer.json')):
         raise DedupUnavailable('model_missing')
     env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
+           'QA_SQLITE_JOURNAL_MODE': journal_mode(),
            'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
            'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
     for start in range(0, len(missing), 256):

@@ -18,6 +18,7 @@ from .taxonomy import TopicSelection, visual_topic_support
 from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
 from .execution import DEFAULT_LIMITS, WorkInterrupted
 from .source_files import verify_reference
+from .sqlite_support import sqlite_diagnostics
 
 CHECKS = ['supported', 'independent', 'scope_correct', 'knowledge_value', 'distinct', 'topic_correct']
 BILINGUAL_CHECKS = ['language_correct', 'translation_consistent']
@@ -1152,7 +1153,8 @@ class Worker:
                 return
             message = str(error) if isinstance(error,ValueError) else '内部处理失败；已保留证据及候选，可重试继续。'
             store.event(doc['id'], 'run_failed', {'run_id':run_id,'stage':current_stage,'error':message,
-                                                'error_type':type(error).__name__,'seconds':round(time.perf_counter()-started,2),'timings':timings})
+                                                'error_type':type(error).__name__,**sqlite_diagnostics(error),
+                                                'seconds':round(time.perf_counter()-started,2),'timings':timings})
             store.update_document(doc['id'],status='failed',error=message,progress='',seconds=round(time.perf_counter()-started,2))
             try:
                 store.task_update(task['id'],self.name,'failed','failed')

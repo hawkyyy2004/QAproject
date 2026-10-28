@@ -10,6 +10,7 @@ from .persistence import file_hash
 from .source_files import signature
 from .store import digest, uid
 from .settings import ROOT
+from .sqlite_support import initialize_journal
 
 FORMATS = {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv'}
 
@@ -30,7 +31,7 @@ class LibraryIndex:
         self.running = False
         if self.root:
             with self.connect() as db:
-                db.execute('PRAGMA journal_mode=WAL')
+                initialize_journal(db)
                 db.executescript('''CREATE TABLE IF NOT EXISTS entries(
                     id TEXT PRIMARY KEY,root TEXT,relative_path TEXT,name TEXT,name_fold TEXT,size INTEGER,
                     modified REAL,version TEXT,seen TEXT,missing INTEGER DEFAULT 0,

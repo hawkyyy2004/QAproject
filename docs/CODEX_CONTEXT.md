@@ -337,3 +337,18 @@ E盘实测：`067090_ct1.csv` 5 单元（列 `THETA(DEG C)`、`STNNBR = 223`、`
 第一次重解析发现两个残留问题：仍有"某CTD剖面"这种没有主语的开头，还有一条直接问"数值范围与均值各是多少"的查表题。GENERATE 补第二条主语规则（用站号/断面名/航次，或"某深度区间的某要素"；不用"某CTD剖面、某次观测、一组数据"；不拿日期和经纬度堆句首当背景），REVIEW 补两个判据（数据证据只索取范围、均值、单位清单且不作解释比较的判 `knowledge_value=false`；主语是"某剖面"一类空指代的判 `independent=false`）。
 
 重跑结果：三份均 5 个单元、5 组双语，"ANT-II/3 航次 228 站位……4–400 dbar 盐度如何随压力变化"，答案给出跃层位置与其下基本稳定的结构；中英两版等义，thinking 带读数依据。仍未调用 `approve_all`，等用户核对。
+
+
+## 2026-10-28 Windows WAL 并发只读兼容修复
+
+用户提供《问题报告-WAL并发只读》，要求修复Windows端且优先保护性能。保留当前已有未提交CSV/网页/GLM/解析修改，未覆盖或回退。新增sqlite_support.py统一选择：QA_SQLITE_JOURNAL_MODE默认auto，Windows DELETE、macOS/Linux WAL；可显式覆盖WAL/DELETE，非法值启动拒绝。Store只在初始化设置并验证journal_mode，connect热路径不再设置；library、semantic初始化同策略，编码子进程继承无密钥模式变量。无全局事务串行锁、不降低2文件/2模型并发、无额外模型调用、不改synchronous/质量流程；需停旧服务更新重启，不手删WAL/SHM。
+
+pipeline.run_failed、qa_summary.qa_revision_failed记录安全SQLite错误码和扩展名，不记录任意原始异常字符串。报告底层共享内存原因尚未获原生错误码证明。新增16项专项，默认全套先291项通过，补2项后DELETE全套293项通过；macOS上覆盖Windows策略分支/DELETE并发2/4/8线程、三库迁移保留、回滚/完整性、热连接、子进程继承和文件/编辑错误码，不能冒充Windows实机验收。
+
+scripts/check_sqlite_journal.py可作Windows复测或带--baseline-root做隔离对照。runtime/sqlite-journal-check/baseline-20261028保存本轮开始时工作区源码（含已有CSV改动）；comparison-20261028/report.json是本机各5轮双12页PDF、50ms模拟响应对照：文件流程中位改前WAL.543705、修改后WAL.541986、DELETE.512861秒，均14次模拟调用/两篇各5组/20条受控入库。8线程400事务分别.163956/.192039/.409081秒且零错误；DELETE写密集更慢，不能承诺Windows或生产文件处理绝对零影响。阶段/登记/提交/导出查询分开记录，非真实GLM/端到端验收。README21.27含默认行为、覆盖变量和Windows命令。未改正式数据、重启服务、提交、上传、部署或移动v19标签。
+
+## 2026-10-28 v23合并
+
+用户明确CSV冲突优先同事方案，Windows测试问题同步，最终发布v23。以远端v22（499330b）为基线合入Windows SQLite日志模式、脱敏错误码和复测脚本；保留同事CSV/TSV/netCDF处理、数据问题质量规则、本地Embedding镜像安装。另一套本地CSV方案及原始改动已存runtime备份和Git stash，不进入版本。上传区保留本地去掉限额提示的展示调整，同时保留同事支持格式。未修改现有远端v19/v20标签，正式资料和冻结证据不改写。
+
+合并验证：补装并声明netCDF4，显式DELETE模式完整286项通过，无跳过；在macOS上测试，不是Windows实机验收。运行环境/模型/密钥/正式库不提交；本次仅额外安装netCDF读取依赖，未重启正式服务。README版本为v23。

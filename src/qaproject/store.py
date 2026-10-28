@@ -8,6 +8,7 @@ import time
 import uuid
 
 from .settings import MIN_DOCUMENT_TOPICS, MAX_DOCUMENT_TOPICS, MAX_DOCUMENT_SEARCH_TERMS
+from .sqlite_support import initialize_journal
 
 CORE_TOPICS = [
     ('数学', '数学概念、关系、方法与应用。', ['数学研究']),
@@ -94,6 +95,7 @@ class Store:
             (self.root / name).mkdir(parents=True, exist_ok=True)
         self.db = self.root / 'state.sqlite3'
         with self.connect() as db:
+            initialize_journal(db)
             db.executescript('''
             CREATE TABLE IF NOT EXISTS documents(
               id TEXT PRIMARY KEY, content_hash TEXT UNIQUE, name TEXT, path TEXT,
@@ -196,9 +198,8 @@ class Store:
     def connect(self):
         db = sqlite3.connect(self.db, timeout=10)
         db.row_factory = sqlite3.Row
-        db.execute('PRAGMA foreign_keys=ON')
-        db.execute('PRAGMA journal_mode=WAL')
         try:
+            db.execute('PRAGMA foreign_keys=ON')
             yield db
             db.commit()
         except Exception:

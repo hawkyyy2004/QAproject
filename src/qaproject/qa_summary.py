@@ -6,6 +6,7 @@ from .store import digest, encode, normalized, uid
 from .execution import WorkInterrupted
 from .conflicts import EditConflict
 from .source_files import verify_reference
+from .sqlite_support import sqlite_diagnostics
 
 
 def members(db, qa_id):
@@ -184,6 +185,7 @@ def process_revision(store, task, worker, call, check_duplicates):
             db.execute("UPDATE tasks SET status='failed',stage='qa_revision' WHERE id=?",(task['id'],))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),task['document_id'],'qa_revision_failed',
                        encode({'revision_id':revision_id,'stage':'review_or_commit','error_type':type(error).__name__,
+                               **sqlite_diagnostics(error),
                                'seconds':round(time.perf_counter()-started,3),'note':note}),time.time()))
 
 
