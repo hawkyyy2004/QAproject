@@ -329,3 +329,11 @@ E盘实测：`067090_ct1.csv` 5 单元（列 `THETA(DEG C)`、`STNNBR = 223`、`
 据此把镜像写进配置并改脚本：`config/embedding-model.json` 每个文件增加 `mirror` 字段，`setup_search_model.py` 抽出 `download()`，主源失败自动换镜像，两条路径都做同一套 hash/length 校验，都失败才 `SystemExit`。实测把 `MODEL_README.md` 删掉重跑，主源超时后自动走镜像并验证通过。
 
 恢复：重启服务后重试五份失败文件，`cross_dedup_complete` 正常落事件（约 1.5 秒/次，`qa_vectors` 126 条），全部回到 `waiting_review`；对 `067098_ct1.csv` 调用 `approve_all` 返回 `{"approved":10,"failed":[]}`，一键入库链路恢复。
+
+## 2026-10-28 旧切法 CSV 按新证据重解析
+
+用户要求把 067093/067094/067095 三份旧切法文件（22–24 个证据单元）按新的 schema/stats/excerpt 方案重解析。`scripts/rebuild_evidence.py` 对已有入库问答的文件按设计是拒绝的（证据冻结），所以走的是"先备份、再强制重置"：把 30 条已入库问答导出到 `runtime/backups/reparse-20261028/approved-qa.{csv,json}`，然后在同一事务里清 `qas`、`candidates`、`qa_pairs`、`document_topics`、`document_search_terms`、`assets`，`documents` 回到 `queued`、`units='[]'`，`assets/images/<id>` 一并清掉，重新排队。文档 ID 和原件不动，事件记 `evidence_reset`。
+
+第一次重解析发现两个残留问题：仍有"某CTD剖面"这种没有主语的开头，还有一条直接问"数值范围与均值各是多少"的查表题。GENERATE 补第二条主语规则（用站号/断面名/航次，或"某深度区间的某要素"；不用"某CTD剖面、某次观测、一组数据"；不拿日期和经纬度堆句首当背景），REVIEW 补两个判据（数据证据只索取范围、均值、单位清单且不作解释比较的判 `knowledge_value=false`；主语是"某剖面"一类空指代的判 `independent=false`）。
+
+重跑结果：三份均 5 个单元、5 组双语，"ANT-II/3 航次 228 站位……4–400 dbar 盐度如何随压力变化"，答案给出跃层位置与其下基本稳定的结构；中英两版等义，thinking 带读数依据。仍未调用 `approve_all`，等用户核对。
