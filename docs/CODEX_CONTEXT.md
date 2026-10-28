@@ -319,3 +319,13 @@ PDF分支语法树与基线一致；额外本地冷准备测量有波动：120�
 E盘实测：`067090_ct1.csv` 5 单元（列 `THETA(DEG C)`、`STNNBR = 223`、`CTDPRS/DBAR: 4~798`）；`woa18_all_A00_01.nc`（176MB）8 单元、0.2–0.9 秒；`16908_06AQ19840719_bottle.nc` 9 单元，从 40+ 变量里挑出温度/氧/硝酸盐/磷酸盐；`gocd_a0000068_46023_199909.nc` 3 单元（u、v 洋流），时间轴显示为日期；`06AQ19840719_00319_00001_hy1.nc` 4 单元，全填值的 bottle_oxygen 正确跳过。NCEI 部分文件单位本身写作 `??C(ITS90)`，按原样保留不修正。
 
 测试：新增 `tests/test_datasets.py` 9 项（WOCE 表头、Excel 式表头、cp1252 度符号、gb18030 中文列名、netCDF schema/深度标注、全填值变量不出单元、csv/tsv/nc 路由）。旧 `test_long_evidence` 的 csv 定位断言从 `record-0002-0003-seg-` 改为 `record-0001-seg-`。与 v19（同事的向量缓存修复）合并后全套 266 项通过、2 项跳过，用时 392 秒。因 v19 标签已被同事占用，本次发布为 v20。
+
+## 2026-10-28 跨文档查重模型缺失导致整批失败
+
+用户报“跨文档查重未完成…本次未放行，csv 文件全部失效”。查库：`cross_dedup_unavailable` 事件的 `finish_reason` 全是 `model_missing`，失败的五份 CSV 都停在 `reviewing` 阶段的查重子步骤。根因是 v19 把查重从“缺失就静默放行”改成“缺失就阻断”，而本机 `runtime/models/bge-small-zh-v1.5/` 根本没装上——此前一直走的是静默降级路径，所以没暴露。
+
+安装模型：`scripts/setup_search_model.py` 主源 huggingface.co 连不上（境内网络），`hf-mirror.com` 当时也挂了且 24 MB 的 onnx 传了将近两分钟才完成，tokenizer.json 反复超时。改为从 ModelScope 上同一 `Xenova/bge-small-zh-v1.5` 仓库取文件，三个文件的 SHA-256 与 `config/embedding-model.json` 里的固定值逐字节一致（tokenizer.json `48cea5d4…`、model.onnx `15b717c3…`、README `cb22054d…`），不是随便抓一份权重。
+
+据此把镜像写进配置并改脚本：`config/embedding-model.json` 每个文件增加 `mirror` 字段，`setup_search_model.py` 抽出 `download()`，主源失败自动换镜像，两条路径都做同一套 hash/length 校验，都失败才 `SystemExit`。实测把 `MODEL_README.md` 删掉重跑，主源超时后自动走镜像并验证通过。
+
+恢复：重启服务后重试五份失败文件，`cross_dedup_complete` 正常落事件（约 1.5 秒/次，`qa_vectors` 126 条），全部回到 `waiting_review`；对 `067098_ct1.csv` 调用 `approve_all` 返回 `{"approved":10,"failed":[]}`，一键入库链路恢复。
