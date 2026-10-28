@@ -200,11 +200,16 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         form=await request.form(max_files=50,max_fields=5)
         files=[value for _,value in form.multi_items() if hasattr(value,'read') and hasattr(value,'filename')]
         if not files: raise HTTPException(400,'请选择文件')
-        limit=settings()['max_file_mb']*1024*1024
+        limits = settings()
         results=[]
         for file in files:
-            if Path(file.filename).suffix.lower() not in {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv'}:
+            suffix = Path(file.filename).suffix.lower()
+            if suffix not in {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4'}:
                 results.append({'name':file.filename,'error':'该格式尚未支持'});continue
+            # Gridded climate files are legitimately hundreds of MB; the reader
+            # samples slices, so the old 25 MB ceiling was the only obstacle.
+            limit = int(limits.get('max_netcdf_mb', 2048) if suffix in {'.nc', '.nc4'}
+                        else limits['max_file_mb'])*1024*1024
             data=await file.read(limit+1)
             if not data or len(data)>limit:
                 results.append({'name':file.filename,'error':'文件为空或超出大小限制'});continue

@@ -87,10 +87,10 @@ def test_other_formats_do_not_fail_or_invent_pdf_pages(tmp_path,suffix):
         assert ''.join(u['text'] for u in units)==long.strip()+'A separate paragraph.'
         assert [u['seg'] for u in units]==list(range(1,len(units)+1))
     else:
-        # Current CSV evidence is a serialized header/record block; all values survive.
+        # A table without numeric records is kept as raw text, point for point.
         text=''.join(u['text'] for u in units)
         assert long in text and 'short second record' in text and 'description' in text
-        assert all(u['locator'].startswith('record-0002-0003-seg-') for u in units)
+        assert all(u['locator'].startswith('record-0001-seg-') for u in units)
     assert_hashes(units)
 
 

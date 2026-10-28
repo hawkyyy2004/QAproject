@@ -6,6 +6,7 @@ import re
 
 import pymupdf
 
+from . import datasets
 from . import layout as layout_cache
 from .store import digest
 
@@ -271,17 +272,21 @@ def extract(store, doc, config, progress=None):
             if paragraph.strip():
                 add(paragraph.strip(), 0, s, locator=f'seg-{s:02d}')
         pages = 0
-    elif suffix == '.csv':
-        rows = list(csv.reader(io.StringIO(path.read_text(encoding='utf-8-sig'))))
-        if not rows:
-            raise ValueError('CSV 为空')
-        for i in range(1, len(rows), 30):
-            segment = rows[i:i+30]
-            add(str({'columns': rows[0], 'rows': segment}), 0, i,
-                locator=f'record-{i+1:04d}-{i+len(segment):04d}')
+    elif suffix in {'.csv', '.tsv'}:
+        # A data table is evidence only as schema, ranges and sampled rows; the
+        # previous "first 30 rows, then the next 30" produced hundreds of units
+        # that all taught the same thing.
+        for item in datasets.csv_units(path, sample=int(config.get('csv_sample_rows', 12))):
+            add(item['text'], 0, item['seg'], locator=item['locator'],
+                evidence_kind=item['evidence_kind'], columns=item.get('columns'))
+        pages = 0
+    elif suffix in {'.nc', '.nc4'}:
+        for item in datasets.netcdf_units(path, max_variables=int(config.get('netcdf_max_variables', 8))):
+            add(item['text'], 0, item['seg'], locator=item['locator'],
+                evidence_kind=item['evidence_kind'], variable=item.get('variable'))
         pages = 0
     else:
-        raise ValueError('初版支持 PDF、PNG/JPG/WebP、CSV、TXT/MD。')
+        raise ValueError('支持 PDF、PNG/JPG/WebP、CSV/TSV、netCDF(.nc)、TXT/MD。')
     if not units:
         raise ValueError('没有可读取证据')
     for unit in units:
