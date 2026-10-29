@@ -428,7 +428,7 @@ class Worker:
                 if cached.is_file():
                     if facts_request:
                         try:
-                            cached_result = json.loads(cached.read_text())['result']
+                            cached_result = json.loads(cached.read_text(encoding='utf-8'))['result']
                             content_facts(cached_result, group)
                         except (ValueError, KeyError, TypeError):
                             # Keep the rejected response for diagnosis, but never reuse it.
@@ -437,7 +437,7 @@ class Worker:
                                         'signature':cached.stem, 'code':'facts', 'units':len(group)})
                             continue
                     else:
-                        cached_result = json.loads(cached.read_text())['result']
+                        cached_result = json.loads(cached.read_text(encoding='utf-8'))['result']
                         if not response_shape_ok(kind, instruction, cached_result):
                             # Same poisoning mode as the v05 facts fix: keep the
                             # rejected cache for diagnosis, never replay it.
@@ -538,7 +538,7 @@ class Worker:
 
             images = sum(bool(u.get('image')) for u in group)
             if plan.is_file():
-                return split_call(json.loads(plan.read_text())['single_image'])
+                return split_call(json.loads(plan.read_text(encoding='utf-8'))['single_image'])
             if images>1 and single_image_requests.is_set():
                 return split_call(True)
             # This is the model's finite request limit, not a document spending limit.

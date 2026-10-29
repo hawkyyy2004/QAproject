@@ -7,6 +7,7 @@ attached, so evidence preparation needs no model and no GPU. A document without
 a manifest keeps the previous whole-page behaviour, so MinerU stays optional.
 """
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -72,7 +73,8 @@ def runner(config):
             explicit = str(venv) if venv.is_file() else sys.executable
     if explicit not in _RUNNER:
         # Probing costs about a second; a service restart re-probes.
-        probe = subprocess.run([explicit, '-c', 'import mineru'], capture_output=True, text=True)
+        probe = subprocess.run([explicit, '-c', 'import mineru'], capture_output=True, text=True,
+                               encoding='utf-8', errors='replace')
         _RUNNER[explicit] = probe.returncode == 0
     return explicit if _RUNNER[explicit] else ''
 
@@ -93,8 +95,11 @@ def prepare(store, doc, config):
                '--mineru-python', python, '--tier', str(block.get('tier') or 'basic'),
                '--dpi', str(int(block.get('dpi') or 200)), '--jobs', '1']
     try:
+        # PYTHONIOENCODING pins the child's pipe to UTF-8 even on a GBK Windows
+        # console; otherwise a non-GBK character in its output kills the print.
         run = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
-                             errors='replace', timeout=int(block.get('timeout_seconds') or 900))
+                             errors='replace', timeout=int(block.get('timeout_seconds') or 900),
+                             env=dict(os.environ, PYTHONIOENCODING='utf-8'))
     except subprocess.TimeoutExpired:
         return {}, 'MinerU 超时，保留整页'
     pages = load(store, doc.get('content_hash'))

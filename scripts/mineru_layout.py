@@ -368,7 +368,10 @@ def process(pdf, args):
         return {'file': pdf.name, 'status': 'skipped'}
     target.mkdir(parents=True, exist_ok=True)
     raw = target / 'mineru.json'
-    env = dict(os.environ, MINERU_MODEL_SOURCE=os.environ.get('MINERU_MODEL_SOURCE', 'modelscope'))
+    # The MinerU worker also prints to a pipe: pin UTF-8 on both hops so a
+    # Chinese Windows locale cannot mangle or crash the captured output.
+    env = dict(os.environ, MINERU_MODEL_SOURCE=os.environ.get('MINERU_MODEL_SOURCE', 'modelscope'),
+               PYTHONIOENCODING='utf-8')
     worker = ROOT / 'scripts/mineru_parse_worker.py'
     run = subprocess.run([args.mineru_python, str(worker), str(pdf), str(raw), args.tier],
                          capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
@@ -390,6 +393,9 @@ def process(pdf, args):
 
 def main(argv=None):
     args = parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        # A GBK console cannot print characters like U+FFFD; degrade, never crash.
+        stream.reconfigure(errors='replace')
     files = collect(args)
     if not files:
         raise SystemExit('没有找到 PDF；请给出文件、目录或 --list 路径清单。')
