@@ -116,6 +116,7 @@ def test_layout_can_be_disabled_or_ignored_when_stale(tmp_path):
 def test_auto_builds_the_layout_when_no_manifest_exists(tmp_path, monkeypatch):
     store = Store(tmp_path/'auto')
     doc_id, _ = store.import_file('plot.pdf', graphics_pdf(), 'live')
+    store.update_document(doc_id, layout_note='上次未生成清单，保留整页')
     doc = store.document(doc_id)
     pages = [{'page': 1, 'blocks': [
         {'kind': 'text', 'text': '观测期间表层叶绿素 a 平均 2.1 mg/m3。'},
@@ -130,6 +131,8 @@ def test_auto_builds_the_layout_when_no_manifest_exists(tmp_path, monkeypatch):
     units, _ = extract(store, store.document(doc_id), settings())
     assert [u['evidence_kind'] for u in units if u['image']] == ['pdf_formula']
     assert units[0]['text'].startswith('观测期间')
+    # A working manifest clears the old whole-page warning.
+    assert store.document(doc_id)['layout_note'] == ''
 
 
 def test_auto_falls_back_when_mineru_is_unavailable(tmp_path, monkeypatch):
@@ -138,6 +141,8 @@ def test_auto_falls_back_when_mineru_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr('qaproject.parsers.layout_cache.prepare', lambda *args: ({}, '未找到可用的 MinerU 解释器，保留整页'))
     units, _ = extract(store, store.document(doc_id), settings())
     assert any(u.get('evidence_kind') == 'pdf_page' for u in units)
+    # The downgrade is recorded, so the file list can no longer hide it.
+    assert '保留整页' in store.document(doc_id)['layout_note']
 
 
 def test_cropped_figures_join_the_topic_that_owns_their_page():

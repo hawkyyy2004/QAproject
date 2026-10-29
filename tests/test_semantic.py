@@ -115,7 +115,7 @@ def test_model_inference_not_imported_by_application():
     env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1]/'src')}
     result = subprocess.run([sys.executable, '-c',
         "import sys; import qaproject.app; print(any(m in sys.modules for m in ['numpy','onnxruntime','tokenizers']))"],
-        env=env, capture_output=True, text=True, check=True)
+        env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True)
     assert result.stdout.strip() == 'False'
 
 

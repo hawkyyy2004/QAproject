@@ -107,9 +107,11 @@ runtime/live/layout/<pdf sha256>/
 
 `mineru.python` 留空时按 `MINERU_PYTHON`（可在 `.env.local` 写）→ `runtime/mineru-venv` → 当前解释器 的顺序找，并且会 `import mineru` 探活，探不到就当没装、走整页。`tier`、`dpi`、`timeout_seconds` 只影响服务自己生成的那一份清单。
 
-改完配置后重启服务才生效。
+改完配置后重启服务才生效。探活失败另带 5 分钟冷却：装好 MinerU 或改对 `mineru.python` 后，重新处理该文件即可生效，不必为一次探测失败重启服务。
 
-判断这次到底走没走 MinerU，看该文件的事件流：有 `layout_prepared` 且 `pages>0` 就是按图裁的；`note` 会写明失败原因（大多数情况用"未找到可用的 MinerU 解释器"就能定位到 `mineru.python` 配错）。
+判断这次到底走没走 MinerU，看两处：文件列表与详情页的提示条（`documents.layout_note`，清单生成成功后自动清空），以及该文件的事件流 `layout_prepared`。有 `pages>0` 就是按图裁的；`note` 写明失败原因（大多数情况用"未找到可用的 MinerU 解释器"就能定位到 `mineru.python` 配错）。
+
+在中文 Windows 上，探测与被调脚本的输出一律按 UTF-8 解码（子进程环境另外注入 `PYTHONIOENCODING=utf-8`、`PYTHONUTF8=1`）。否则未开启"Beta: UTF-8"的机器会用 GBK 解码子进程输出，抛 `UnicodeDecodeError`，表现为"点重试 0.0x 秒就失败、怎么重试都一样"。
 
 ## 六、性能与容量（本机实测）
 

@@ -26,7 +26,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
 import pymupdf
+
+from qaproject.console import child_env, repair_streams
 
 ROOT = Path(__file__).resolve().parents[1]
 VISUAL = {'image', 'chart'}
@@ -370,8 +374,7 @@ def process(pdf, args):
     raw = target / 'mineru.json'
     # The MinerU worker also prints to a pipe: pin UTF-8 on both hops so a
     # Chinese Windows locale cannot mangle or crash the captured output.
-    env = dict(os.environ, MINERU_MODEL_SOURCE=os.environ.get('MINERU_MODEL_SOURCE', 'modelscope'),
-               PYTHONIOENCODING='utf-8')
+    env = child_env(dict(os.environ, MINERU_MODEL_SOURCE=os.environ.get('MINERU_MODEL_SOURCE', 'modelscope')))
     worker = ROOT / 'scripts/mineru_parse_worker.py'
     run = subprocess.run([args.mineru_python, str(worker), str(pdf), str(raw), args.tier],
                          capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
@@ -392,15 +395,20 @@ def process(pdf, args):
 
 
 def main(argv=None):
+    # Progress lines are JSON with Chinese and scientific symbols; a GBK console
+    # must print them with replacements instead of aborting the run.
+    repair_streams()
     args = parse_args(argv)
-    for stream in (sys.stdout, sys.stderr):
-        # A GBK console cannot print characters like U+FFFD; degrade, never crash.
-        stream.reconfigure(errors='replace')
     files = collect(args)
     if not files:
         raise SystemExit('没有找到 PDF；请给出文件、目录或 --list 路径清单。')
-    check = subprocess.run([args.mineru_python, '-c', 'import mineru'],
-                           capture_output=True, text=True)
+    try:
+        check = subprocess.run([args.mineru_python, '-c', 'import mineru'],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace',
+                               env=child_env())
+    except OSError as error:
+        raise SystemExit(f'{args.mineru_python} 无法执行（{error.strerror or error}），'
+                         f'请运行 scripts/setup_mineru.py 并用 --mineru-python 指向它的解释器。')
     if check.returncode:
         raise SystemExit(f'{args.mineru_python} 里没有 MinerU，请先运行 scripts/setup_mineru.py '
                          f'并用 --mineru-python 指向它的解释器。')

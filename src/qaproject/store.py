@@ -54,6 +54,11 @@ def digest(obj):
     return hashlib.sha256(encode(obj).encode()).hexdigest()
 
 
+def load_json(path):
+    """Read a JSON file this project wrote; never through the platform code page."""
+    return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
 def normalized(value):
     return re.sub(r'[\W_]+', '', value.casefold())
 
@@ -165,7 +170,8 @@ class Store:
                               ('source_root', "TEXT DEFAULT ''"),
                               ('source_signature', "TEXT DEFAULT ''"),
                               ('progress', "TEXT DEFAULT ''"),
-                              ('timings', "TEXT DEFAULT '{}'")],
+                              ('timings', "TEXT DEFAULT '{}'"),
+                              ('layout_note', "TEXT DEFAULT ''")],
             }.items():
                 columns = {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}
                 for name, definition in additions:
@@ -389,7 +395,7 @@ class Store:
             # List/search never load evidence bodies, image references or QA answers.
             with self.connect() as db:
                 rows = db.execute('''SELECT d.id,d.name,d.status,substr(d.summary,1,500) AS summary,
-                    d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,
+                    d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,d.layout_note,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id AND c.status!='discarded') AS candidate_count,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id
                         AND c.status NOT IN ('approved','rejected','discarded')) AS pending_commit_count,
@@ -426,7 +432,8 @@ class Store:
         return dict(counts, legacy_count=legacy)
 
     def update_document(self, doc_id, **values):
-        allowed = {'status', 'summary', 'error', 'pages', 'units', 'seconds', 'coverage', 'progress', 'timings'}
+        allowed = {'status', 'summary', 'error', 'pages', 'units', 'seconds', 'coverage', 'progress',
+                   'timings', 'layout_note'}
         if not set(values) <= allowed:
             raise ValueError('不允许更新字段')
         if 'units' in values:

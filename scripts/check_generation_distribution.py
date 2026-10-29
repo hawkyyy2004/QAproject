@@ -74,12 +74,12 @@ def main():
                       pairs=doc['bilingual_count'],distribution=modality_counts(doc['candidates']),
                       rows=len(doc['candidates']),committed=doc['qa_count'],error=doc['error'],calls=calls)
         report['runs'][label] = result
-        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         print(label+' '+json.dumps({k:v for k,v in result.items() if k!='calls'},ensure_ascii=False),flush=True)
     with sqlite3.connect('file:'+str(ROOT/'runtime/live/state.sqlite3')+'?mode=ro',uri=True) as db:
         report['live_data_unchanged'] = before==snapshot(db)
     assert report['live_data_unchanged']
-    report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return 0 if report['runs']['mixed_coverage']['status']=='waiting_review' else 1
 
 

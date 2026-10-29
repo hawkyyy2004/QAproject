@@ -1,6 +1,6 @@
 # QAproject：GLM 本地多模态语料处理系统开发方案
 
-> 项目版本：v25 · 文档版本：0.26 · 更新日期：2026-10-29<br>
+> 项目版本：v26 · 文档版本：0.27 · 更新日期：2026-10-29<br>
 > 当前状态：本地初版已可运行，已具备三个页面模块，公司 GLM 文本/实际图片调用已验证；本地轻量主题语义搜索已接入；服务器部署、完整发布包与 500 篇验收尚未完成。<br>
 > 本目录是新项目的开发根目录。后续代码、配置、提示词、测试、说明、构建与运行产物均在 `QAproject/` 内管理。
 
@@ -1405,3 +1405,13 @@ v23同时补齐netCDF读取所需的`netCDF4`依赖声明；原有安装流程`p
 - 修复：`pipeline.py`中响应缓存与拆分计划的3处读取显式指定UTF-8；`layout.py`与`scripts/mineru_layout.py`经`PYTHONIOENCODING`把MinerU脚本及其内部worker的子进程管道锁定为UTF-8，MinerU探针输出改为容错解码，脚本控制台输出遇不可编码字符降级为替换符而非崩溃。
 - 验证（2026-10-29，Windows实机）：此前重试即失败的《(15)N示踪法》文件重试后全流程跑通（缓存恢复→审核→跨文档查重完成）；再经证据重建以MinerU版面完整重跑，清单8页、9张裁图、无警告，证据由12个整页单元变为78个单元（68文字+10图块），5组双语候选完成生成、审核与查重，状态waiting_review，耗时297秒。该重跑调用真实公司GLM接口，结果待人工审核，未入库。
 - 测试：相关子集26项通过；`test_dedup_cache`万条向量用例在未含本修复的干净v24上同样失败，属本机预存环境问题，与本次改动无关，待单独排查。
+
+### 21.30 重试永久失败与整页静默降级的收尾（2026-10-29，v26）
+
+v25修掉了“GBK解码抛异常”本身，但同事原报的另外两半仍在：重试永远在0.0x秒失败，以及图文证据退回整页而界面不说。本版补齐这两处，并把编码约束收进一个模块。
+
+- **探活失败不再等于永久不可用**：`layout.runner()` 的失败结果改为带时间戳缓存，300秒后自动重探；此前`False`被永久缓存，装好MinerU、改对`MINERU_PYTHON`也要重启服务才生效。探活异常（解释器不存在、不可执行、输出无法解码）一律按“MinerU不可用→整页”处理，不再冒出异常把文件直接判失败。
+- **编码边界收口**：新增`src/qaproject/console.py`。`child_env()`给所有子进程注入`PYTHONIOENCODING=utf-8`与`PYTHONUTF8=1`（v25只设了前者，且各调用点各写一遍）；`repair_streams()`在`run.py`启动时把控制台`errors`改为`replace`，服务自身打印也不再因GBK外字符中断。
+- **其余读文件点补齐UTF-8**：`store.load_json()`统一读项目自写的JSON（应答缓存、拆分计划、`config/embedding-model.json`），`semantic.py`、`embedding.py`、各`scripts/check_*.py`与相关测试的`read_text()/write_text()`全部显式指定编码，测试侧写读成对修改，避免在cp936机器上自相矛盾。
+- **整页回退留痕**（v25遗留的“界面无提示”）：`documents`新增`layout_note`列并自动迁移，`parsers.py`在`auto`模式下把`prepare()`返回的原因落库；文件列表行与详情页提示条直接显示`未找到可用的 MinerU 解释器，保留整页`、`MinerU 未生成清单，保留整页：…`，清单可用或`pdf_layout=off`时自动清空。
+- **验证（2026-10-29，Windows）**：新增`tests/test_encoding.py`7项（子进程环境开关、UTF-8读取与GBK解码必然失败对照、探活参数固定、失败缓存与TTL重探、解释器缺失、GBK控制台打印）；`test_layout_manifest.py`断言整页回退写入`layout_note`、清单可用后清空；`test_store_migrations.py`纳入新列；全套`pytest -q` 291项通过、2项跳过。用故意配错的`mineru.python`端到端复跑：单页PDF照常出证据，`layout_note`为`未找到可用的 MinerU 解释器，保留整页`；`scripts/mineru_layout.py`改为中文提示退出而非堆栈。未调用真实GLM，未改动正式资料。

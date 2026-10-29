@@ -110,7 +110,7 @@ def main():
             report['single']={'status':'measured','rows':len(rows),'seconds':round(time.perf_counter()-started,3),'calls':calls}
         except ValueError as error:
             report['single']={'status':'failed','seconds':round(time.perf_counter()-started,3),'error':str(error),'calls':calls}
-    (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({'report':str(folder/'report.json'),**report},ensure_ascii=False,indent=2))
     return 0 if doc['status']=='waiting_review' and doc['bilingual_count']==args.pairs and report['bilingual']['review_passed_pairs']==args.pairs else 1
 

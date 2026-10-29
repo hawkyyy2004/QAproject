@@ -14,6 +14,13 @@ from pathlib import Path
 
 
 def main():
+    # Runs inside the MinerU virtualenv, so no project imports: a Chinese console
+    # must print replacements instead of aborting on an unencodable file name.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='replace')
+        except (AttributeError, ValueError):
+            pass
     pdf, out = Path(sys.argv[1]), Path(sys.argv[2])
     tier = sys.argv[3] if len(sys.argv) > 3 else 'basic'
     page_range = sys.argv[4] if len(sys.argv) > 4 else ''

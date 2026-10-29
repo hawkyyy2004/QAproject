@@ -24,7 +24,8 @@ def main():
     folder.mkdir(parents=True)
     baseline=folder/'baseline_qaproject'
     baseline.mkdir()
-    revision=subprocess.run(['git','rev-parse',args.baseline_ref],cwd=ROOT,check=True,capture_output=True,text=True).stdout.strip()
+    revision=subprocess.run(['git','rev-parse',args.baseline_ref],cwd=ROOT,check=True,capture_output=True,
+                            text=True,encoding='utf-8',errors='replace').stdout.strip()
     for name in ('__init__.py','settings.py','store.py','parsers.py','glm.py','pipeline.py','taxonomy.py'):
         raw=subprocess.run(['git','show',revision+':src/qaproject/'+name],cwd=ROOT,check=True,capture_output=True).stdout
         (baseline/name).write_bytes(raw)
@@ -51,7 +52,7 @@ def main():
     report=dict(source_document_id=args.document_id,baseline_revision=revision,frozen_evidence_reused=True,
                 response_cache_reused=False,includes_pdf_reparse=False,live_qa_changed=False,runs={})
     report_file=folder/'report.json'
-    report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print('report='+str(report_file),flush=True)
     for label,store_type,worker_type in (('baseline',BeforeStore,BeforeWorker),('updated',Store,Worker)):
         store=store_type(folder/label)
@@ -66,7 +67,7 @@ def main():
                     pending_pairs=len({c['pair_id'] for c in doc['candidates'] if c['status']=='pending'}),
                     committed=doc['qa_count'],error=doc['error'],calls=calls)
         report['runs'][label]=result
-        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         print(label+' '+json.dumps({k:v for k,v in result.items() if k!='calls'},ensure_ascii=False),flush=True)
         if label=='updated' and doc['status']=='waiting_review':
             for c in doc['candidates']:

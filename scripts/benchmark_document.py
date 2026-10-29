@@ -28,7 +28,7 @@ def main():
         doc_id, created = store.import_file(original['name'], Path(original['path']).read_bytes(), 'live')
         if not created:
             parser.error('Use a new name for a cold run; previous evidence is preserved')
-    (folder/'document-id.txt').write_text(doc_id)
+    (folder/'document-id.txt').write_text(doc_id, encoding='utf-8')
     worker = Worker(store)
     task = store.claim(worker.name, document_id=doc_id)
     if not task:
@@ -41,7 +41,7 @@ def main():
               'pages':doc['pages'], 'seconds':doc['seconds'], 'timings':doc['timings'],
               'candidates':len(doc['candidates']), 'committed':doc['qa_count'], 'error':doc['error'],
               'calls':calls, 'cold':not args.recover_live}
-    (folder/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    (folder/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if doc['status']=='waiting_review' else 1
 

@@ -54,7 +54,7 @@ def implementation(args):
         median_seconds={k:statistics.median(r[k] for r in measurements) for k in measurements[0]},
         warmed_10000_seconds=large_times,warmed_10000_median=statistics.median(large_times),
         scope='Only local vector caching/encoding. No PDF parsing, GLM, review, commit or export timing.')
-    (output/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
+    (output/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(result,ensure_ascii=False))
 
 
@@ -73,9 +73,10 @@ def main():
         for label,root in [('baseline',Path(args.baseline_root).resolve()),('current',ROOT)]:
             done=subprocess.run([sys.executable,str(Path(__file__).resolve()),'--implementation-root',str(root),
                 '--model-dir',str(Path(args.model_dir).resolve()),'--questions',str(args.questions),
-                '--rounds',str(args.rounds),'--output',str(output/label)],check=True,capture_output=True,text=True)
+                '--rounds',str(args.rounds),'--output',str(output/label)],check=True,capture_output=True,
+                text=True,encoding='utf-8',errors='replace')
             reports[label]=json.loads(done.stdout)
-        (output/'comparison.json').write_text(json.dumps(reports,ensure_ascii=False,indent=2))
+        (output/'comparison.json').write_text(json.dumps(reports,ensure_ascii=False,indent=2),encoding='utf-8')
         print(json.dumps(reports,ensure_ascii=False,indent=2))
     else:
         implementation(args)

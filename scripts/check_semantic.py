@@ -76,7 +76,7 @@ def main():
               'pending_pdf_defers_inference': True, 'cached_search_while_busy': True,
               'scope': '真实本地模型、隔离合成主题；不调用公司API，不含PDF端到端性能对照。'}
     output = root / 'report.json'
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(output)
 

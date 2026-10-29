@@ -18,7 +18,8 @@ def test_reopening_old_workspace_preserves_data_and_column_defaults(tmp_path, ve
             removals = {
                 'tasks': ['review_candidate_id', 'revision_id', 'initial_stage'],
                 'qa_pairs': ['repair_attempts'],
-                'documents': ['unit_count', 'source_kind', 'source_root', 'source_signature', 'progress', 'timings'],
+                'documents': ['unit_count', 'source_kind', 'source_root', 'source_signature', 'progress',
+                              'timings', 'layout_note'],
             }
             for table, columns in removals.items():
                 # A partially upgraded release already has the first added column.

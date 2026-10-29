@@ -61,7 +61,7 @@ def test_invalid_facts_split_before_cache_and_cover_every_unit(tmp_path, monkeyp
     assert sorted(map(len,calls))==[1,16,16,32]
     assert not cache_file(store, units[:32]).exists()
     for group in (units[:16],units[16:32],units[32:]):
-        content_facts(json.loads(cache_file(store,group).read_text())['result'], group)
+        content_facts(json.loads(cache_file(store,group).read_text(encoding='utf-8'))['result'], group)
     error, = events(store,'model_error')
     assert error['code']=='facts' and error['error_category']=='facts_validation'
     assert error['seconds']==0.01 and error['finish_reason']=='stop'
@@ -73,10 +73,10 @@ def test_old_bad_cache_is_quarantined_and_good_batch_is_reused(tmp_path, monkeyp
     store, doc_id, units = setup_document(tmp_path, count=33)
     good = cache_file(store, units[:32])
     original = encode({'result':facts(units[:32]), 'stats':{}})
-    good.write_text(original)
+    good.write_text(original, encoding='utf-8')
     bad = cache_file(store, units[32:], legacy=legacy)
     rejected = encode({'result':{'facts':[]}, 'stats':{}})
-    bad.write_text(rejected)
+    bad.write_text(rejected, encoding='utf-8')
     calls = []
     def call(self, instruction, payload, group=(), **kwargs):
         if payload.get('analysis_phase')=='facts':
@@ -86,11 +86,11 @@ def test_old_bad_cache_is_quarantined_and_good_batch_is_reused(tmp_path, monkeyp
     monkeypatch.setattr(GLMClient, 'call', call)
     doc = process(store, doc_id)
     assert doc['coverage']=='complete', doc['error']
-    assert calls==[[units[32]['id']]] and good.read_text()==original
+    assert calls==[[units[32]['id']]] and good.read_text(encoding='utf-8')==original
     quarantined = list(bad.parent.glob(bad.stem+'.invalid-*.json'))
-    assert len(quarantined)==1 and quarantined[0].read_text()==rejected
+    assert len(quarantined)==1 and quarantined[0].read_text(encoding='utf-8')==rejected
     assert len(events(store,'cache_invalid'))==1
-    content_facts(json.loads(cache_file(store,units[32:]).read_text())['result'], units[32:])
+    content_facts(json.loads(cache_file(store,units[32:]).read_text(encoding='utf-8'))['result'], units[32:])
 
 
 def test_resume_after_split_timeout_reuses_successful_children(tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ def test_resume_after_split_timeout_reuses_successful_children(tmp_path, monkeyp
 
 def test_persistent_invalid_single_unit_stops_after_one_retry_without_cache(tmp_path, monkeypatch):
     store, doc_id, units = setup_document(tmp_path, count=33)
-    cache_file(store,units[:32]).write_text(encode({'result':facts(units[:32]),'stats':{}}))
+    cache_file(store,units[:32]).write_text(encode({'result':facts(units[:32]),'stats':{}}), encoding='utf-8')
     calls = []
     def call(self, instruction, payload, group=(), **kwargs):
         calls.append(group)

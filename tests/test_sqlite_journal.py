@@ -140,7 +140,7 @@ def test_encoding_child_inherits_selected_mode_without_credentials(tmp_path,monk
     def child(args,**kwargs):
         assert kwargs['env']['QA_SQLITE_JOURNAL_MODE']=='DELETE'
         assert 'API_KEY' not in kwargs['env']
-        path=Path(args[-2]);job=json.loads(path.read_text())
+        path=Path(args[-2]);job=json.loads(path.read_text(encoding='utf-8'))
         path.write_text(json.dumps({'vectors':{digest(['test',text]):struct.pack('<512f',1.,*([0.]*511)).hex()
                                                for text in job['texts']}}))
         return SimpleNamespace(returncode=0)

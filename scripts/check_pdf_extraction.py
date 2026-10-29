@@ -95,7 +95,7 @@ def main():
                                 'change_percent':round((medians['after']/medians['before']-1)*100, 2)}
         print(json.dumps({name:report['cases'][name]}, ensure_ascii=False), flush=True)
     path = folder/'report.json'
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(str(path))
 
 

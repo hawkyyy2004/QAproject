@@ -472,9 +472,9 @@ def test_cross_document_embedding_jobs_use_distinct_files(tmp_path,monkeypatch):
         path = Path(args[-2])
         paths.append(path)
         barrier.wait(timeout=3)
-        job = json.loads(path.read_text())
+        job = json.loads(path.read_text(encoding='utf-8'))
         job['vectors'] = {digest(['test',text]):struct.pack('<512f', 1., *([0.]*511)).hex() for text in job['texts']}
-        path.write_text(encode(job))
+        path.write_text(encode(job), encoding='utf-8')
         return type('Result',(),{'returncode':0})()
     monkeypatch.setattr('qaproject.semantic.subprocess.run',run)
     with ThreadPoolExecutor(max_workers=2) as pool:

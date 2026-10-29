@@ -22,7 +22,7 @@ def main():
     action.add_argument('--queue',action='store_true')
     action.add_argument('--report',action='store_true')
     args=parser.parse_args()
-    folder=Path((ROOT/'runtime/quality-delivery/latest-path.txt').read_text())
+    folder=Path((ROOT/'runtime/quality-delivery/latest-path.txt').read_text(encoding='utf-8'))
     if args.queue:
         with urllib.request.urlopen('http://127.0.0.1:8765/api/bootstrap') as r:
             session=json.load(r)['session']
@@ -35,7 +35,7 @@ def main():
             with urllib.request.urlopen(request) as r:
                 if not json.load(r).get('queued'):raise ValueError('优化任务未成功登记。')
             queued.append(doc_id)
-        (folder/'queued.json').write_text(json.dumps({'time':time.time(),'documents':queued}))
+        (folder/'queued.json').write_text(json.dumps({'time':time.time(),'documents':queued}),encoding='utf-8')
         print(json.dumps({'queued_documents':len(queued),'report_folder':str(folder)}))
         return
 
@@ -49,9 +49,9 @@ def main():
     isolated.mkdir(exist_ok=True)
     with sqlite3.connect(isolated/'state.sqlite3') as copied:source.backup(copied)
     store=Store(isolated)
-    before=json.loads((folder/'before.json').read_text())
+    before=json.loads((folder/'before.json').read_text(encoding='utf-8'))
     baseline={c['id']:c for d in before for c in d['candidates']}
-    queued=json.loads((folder/'queued.json').read_text())
+    queued=json.loads((folder/'queued.json').read_text(encoding='utf-8'))
     report={'documents':[],'unchanged_healthy_rows':0,'actual_committed_before':source.execute('SELECT COUNT(*) FROM qas').fetchone()[0]}
     for summary in source.execute('SELECT id,name,status,seconds,timings,error FROM documents'):
         doc=store.document(summary['id'])
@@ -74,7 +74,7 @@ def main():
             item['calls']=[{k:e.get(k) for k in ('stage','purpose','model','seconds','images')} for e in events]
         report['documents'].append(item)
     report['actual_committed_after']=source.execute('SELECT COUNT(*) FROM qas').fetchone()[0]
-    (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    (folder/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({'report':str(folder/'report.json'),'healthy_rows_unchanged':report['unchanged_healthy_rows'],
         'delivered_pairs':sum(d['delivered_pairs'] for d in report['documents']),
         'isolated_commit_rows':sum(d['isolated_committed'] for d in report['documents']),

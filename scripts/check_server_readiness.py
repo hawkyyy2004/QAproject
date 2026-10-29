@@ -16,7 +16,7 @@ def measure(args):
     sys.path.insert(0,str(args.baseline if args.variant=='before' else ROOT/'src'))
     from qaproject import settings as config_module
     config_module.ROOT = ROOT
-    cfg = json.loads((args.baseline/'settings.json' if args.variant=='before' else ROOT/'config/settings.json').read_text())
+    cfg = json.loads((args.baseline/'settings.json' if args.variant=='before' else ROOT/'config/settings.json').read_text(encoding='utf-8'))
     cfg['semantic_search'] = {'enabled':False,'cross_document_dedup':False}
     config_module.settings = lambda:cfg
     from qaproject.store import Store, encode, digest
@@ -132,8 +132,10 @@ def main():
                     '--workspace',str(output/name/f'{variant}-{n}'),'--pdf',str(path),'--browse']
                 if args.reference:
                     command.append('--reference')
-                completed = subprocess.run(command,cwd=ROOT,text=True,capture_output=True,check=True,timeout=120,
-                                           env={k:v for k,v in os.environ.items() if k!='API_KEY'})
+                completed = subprocess.run(command,cwd=ROOT,text=True,encoding='utf-8',errors='replace',
+                                           capture_output=True,check=True,timeout=120,
+                                           env=dict({k:v for k,v in os.environ.items() if k!='API_KEY'},
+                                                    PYTHONIOENCODING='utf-8', PYTHONUTF8='1'))
                 result = json.loads(completed.stdout.strip().splitlines()[-1])
                 results[variant].append(result)
                 print(json.dumps(dict(case=name,round=n,variant=variant,total=result['total_seconds']),ensure_ascii=False),flush=True)
@@ -148,7 +150,7 @@ def main():
             total_change_percent=round((medians['after']/medians['before']-1)*100,2),
             preparation_change_percent=round((preparation['after']/preparation['before']-1)*100,2))
     destination = output/'report.json'
-    destination.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    destination.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(str(destination),flush=True)
 
 

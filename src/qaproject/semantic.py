@@ -12,6 +12,7 @@ import threading
 import time
 
 from .settings import ROOT, settings
+from .console import child_env
 from .store import digest, normalized, uid
 from .sqlite_support import initialize_journal, journal_mode
 
@@ -101,7 +102,7 @@ class SemanticSearch:
         self.config = config if config is not None else settings().get('semantic_search', {})
         self.enabled = self.config.get('enabled', False)
         self.model_dir = (ROOT / self.config.get('model_dir', 'runtime/models/bge-small-zh-v1.5')).resolve()
-        spec = json.loads((ROOT / 'config/embedding-model.json').read_text())
+        spec = json.loads((ROOT / 'config/embedding-model.json').read_text(encoding='utf-8'))
         self.model_id = digest([self.config.get('model_id', 'bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
         self.path = store.root / 'search.sqlite3'
         init_cache(self.path)
@@ -219,10 +220,10 @@ class SearchCoordinator:
         canceled = False
         timed_out = False
         # Do not pass company credentials or user shell variables to the model process.
-        env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
-               'QA_SQLITE_JOURNAL_MODE': journal_mode(),
-               'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
-               'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
+        env = child_env({'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
+                         'QA_SQLITE_JOURNAL_MODE': journal_mode(),
+                         'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
+                         'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'})
         try:
             with self.lock:
                 if self.stop.is_set() or self.busy():
@@ -308,10 +309,10 @@ def encode_texts(model_dir, model_id, cache, texts, timeout=None, check=None):
     missing = [text for text in texts if text not in result]
     if missing and not all((Path(model_dir) / f).is_file() for f in ('model.onnx', 'tokenizer.json')):
         raise DedupUnavailable('model_missing')
-    env = {'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
-           'QA_SQLITE_JOURNAL_MODE': journal_mode(),
-           'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
-           'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'}
+    env = child_env({'PATH': os.defpath, 'PYTHONPATH': str(ROOT / 'src'),
+                     'QA_SQLITE_JOURNAL_MODE': journal_mode(),
+                     'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
+                     'TOKENIZERS_PARALLELISM': 'false', 'HF_HUB_OFFLINE': '1'})
     for start in range(0, len(missing), 256):
         if check:
             check()

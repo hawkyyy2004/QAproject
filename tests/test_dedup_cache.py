@@ -58,7 +58,7 @@ def child_runner(monkeypatch):
 
     def run_child(args, **kwargs):
         path=Path(args[-2])
-        calls.append(json.loads(path.read_text()))
+        calls.append(json.loads(path.read_text(encoding='utf-8')))
         with monkeypatch.context() as patch:
             patch.setattr('qaproject.embedding.sys.argv', ['embedding',str(path),'encode-only'])
             encode_only()
@@ -128,10 +128,10 @@ def test_timeout_keeps_completed_vectors_for_retry(tmp_path,monkeypatch):
 def test_invalid_child_result_is_not_success(tmp_path,monkeypatch,damage):
     model=model_files(tmp_path)
     def bad(args,**kwargs):
-        path=Path(args[-2]);payload=json.loads(path.read_text())
+        path=Path(args[-2]);payload=json.loads(path.read_text(encoding='utf-8'))
         raw=(np.full(512,np.nan,dtype='<f4') if damage=='nan' else np.zeros(512,dtype='<f4')).tobytes().hex()
         values={} if damage=='missing' else {digest(['test',payload['texts'][0]]):'00' if damage=='partial' else raw}
-        path.write_text(json.dumps({'vectors':values}))
+        path.write_text(json.dumps({'vectors':values}), encoding='utf-8')
         return SimpleNamespace(returncode=1 if damage=='exit' else 0)
     monkeypatch.setattr('qaproject.semantic.subprocess.run',bad)
     with pytest.raises(DedupUnavailable):

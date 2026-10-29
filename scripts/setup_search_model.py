@@ -12,7 +12,7 @@ from qaproject.settings import settings
 
 
 def main():
-    spec = json.loads((ROOT / 'config/embedding-model.json').read_text())
+    spec = json.loads((ROOT / 'config/embedding-model.json').read_text(encoding='utf-8'))
     directory = ROOT / settings()['semantic_search']['model_dir']
     directory.mkdir(parents=True, exist_ok=True)
     with httpx.Client(timeout=120, follow_redirects=True, trust_env=False) as client:

@@ -48,7 +48,7 @@ def main():
         except ValueError as error:
             run = dict(name=name,error=str(error),stats=getattr(error,'stats',{}))
         report['runs'].append(run)
-        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+        report_file.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         print(json.dumps(run,ensure_ascii=False),flush=True)
         if 'error' in run:
             return 1

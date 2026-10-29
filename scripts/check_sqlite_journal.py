@@ -116,7 +116,8 @@ def main():
         results={}
         for label,root,mode in [('before_wal',Path(args.baseline_root).resolve(),'WAL'),('after_wal',ROOT,'WAL'),('after_delete',ROOT,'DELETE')]:
             done=subprocess.run([sys.executable,str(Path(__file__).resolve()),'--implementation-root',str(root),
-                '--mode',mode,'--rounds',str(args.rounds),'--output',str(out/label)],check=True,capture_output=True,text=True)
+                '--mode',mode,'--rounds',str(args.rounds),'--output',str(out/label)],check=True,capture_output=True,
+                text=True,encoding='utf-8',errors='replace')
             results[label]=json.loads(done.stdout)
         (out/'report.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
         print(json.dumps({k:v['medians'] for k,v in results.items()},ensure_ascii=False,indent=2))

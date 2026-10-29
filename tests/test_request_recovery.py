@@ -162,7 +162,8 @@ def test_legacy_complete_analysis_cache_survives_budget_change(tmp_path,monkeypa
              'existing_topics':classification_catalog(store.topics())},
              'units':units,'config':{k:cfg.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')},
              'max_tokens':2048,'review_attempt':None}
-    (store.root/'runs'/(digest(request)+'.json')).write_text(encode({'result':analysis(units),'stats':{}}))
+    (store.root/'runs'/(digest(request)+'.json')).write_text(encode({'result':analysis(units),'stats':{}}),
+                                                             encoding='utf-8')
     def call(self,instruction,payload,group=(),**kw):
         if 'document_facts' in payload:
             return (facts(group) if payload.get('analysis_phase')=='facts' else analysis(group)),{}

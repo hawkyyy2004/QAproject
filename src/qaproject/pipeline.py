@@ -12,7 +12,7 @@ from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GE
 from .parsers import extract, text_alternatives, model_text, text_view_matches
 from .semantic import cross_document_duplicate, DedupUnavailable
 from .settings import FIELDS, ROOT, settings, source_ref
-from .store import Store, uid, digest, encode, normalized, classification_catalog
+from .store import Store, uid, digest, encode, normalized, classification_catalog, load_json
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection, visual_topic_support
 from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
@@ -388,7 +388,7 @@ class Worker:
             while not self.limits.local_embedding.acquire(timeout=.25):
                 checkpoint()
             try:
-                spec = json.loads((ROOT/'config/embedding-model.json').read_text())
+                spec = load_json(ROOT/'config/embedding-model.json')
                 model_id = digest([dedup.get('model_id','bge-small-zh-v1.5-onnx-int8-cls-v1'), spec])
                 duplicates = cross_document_duplicate(store, ROOT/dedup.get('model_dir','runtime/models/bge-small-zh-v1.5'),
                     model_id, store.root/'search.sqlite3', doc['id'], questions,
@@ -428,7 +428,7 @@ class Worker:
                 if cached.is_file():
                     if facts_request:
                         try:
-                            cached_result = json.loads(cached.read_text(encoding='utf-8'))['result']
+                            cached_result = load_json(cached)['result']
                             content_facts(cached_result, group)
                         except (ValueError, KeyError, TypeError):
                             # Keep the rejected response for diagnosis, but never reuse it.
@@ -437,7 +437,7 @@ class Worker:
                                         'signature':cached.stem, 'code':'facts', 'units':len(group)})
                             continue
                     else:
-                        cached_result = json.loads(cached.read_text(encoding='utf-8'))['result']
+                        cached_result = load_json(cached)['result']
                         if not response_shape_ok(kind, instruction, cached_result):
                             # Same poisoning mode as the v05 facts fix: keep the
                             # rejected cache for diagnosis, never replay it.
@@ -538,7 +538,7 @@ class Worker:
 
             images = sum(bool(u.get('image')) for u in group)
             if plan.is_file():
-                return split_call(json.loads(plan.read_text(encoding='utf-8'))['single_image'])
+                return split_call(load_json(plan)['single_image'])
             if images>1 and single_image_requests.is_set():
                 return split_call(True)
             # This is the model's finite request limit, not a document spending limit.

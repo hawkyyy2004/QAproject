@@ -190,13 +190,13 @@ def test_reference_changed_before_parsing_stops_before_model(tmp_path,monkeypatc
     root = tmp_path/'library'
     root.mkdir()
     path = root/'a.txt'
-    path.write_text('原始观测值15。')
+    path.write_text('原始观测值15。', encoding='utf-8')
     app = create_app(tmp_path/'data',workers=False,library_root=root)
     lib = app.state.library
     lib.scan()
     entry = lib.list_files()['items'][0]
     result = lib.import_entry(entry['id'],entry['version'],1024*1024)
-    path.write_text('已经替换的观测内容。')
+    path.write_text('已经替换的观测内容。', encoding='utf-8')
     calls,_ = provider(monkeypatch)
     assert Worker(app.state.stores['live']).run_once()
     doc = app.state.stores['live'].document(result['id'])
@@ -352,11 +352,11 @@ def test_backup_restore_preserves_rows_hashes_originals_and_revision_history(set
     expected = snapshot(store)
     export = client.get('/api/export').content
     root = store.root.parent
-    (root/'.env.local').write_text('not-a-real-key fixture; must not be included')
+    (root/'.env.local').write_text('not-a-real-key fixture; must not be included', encoding='utf-8')
     saved = tmp_path/'snapshot'
     result = backup_runtime(root,saved)
     assert result['files']>0 and not list(saved.rglob('.env.local'))
-    manifest = json.loads((saved/'manifest.json').read_text())
+    manifest = json.loads((saved/'manifest.json').read_text(encoding='utf-8'))
     assert all(not i['path'].endswith(('-wal','-shm')) for i in manifest['files'])
     shutil.move(str(store.root),str(tmp_path/'retained-old-live'))
     assert restore_runtime(saved,root)['restored']==result['files']
@@ -379,7 +379,7 @@ def test_backup_restore_refuses_active_incomplete_or_overwriting_targets(tmp_pat
     backup_runtime(root,saved)
     with pytest.raises(ValueError,match='已存在'):
         restore_runtime(saved,root)
-    manifest = json.loads((saved/'manifest.json').read_text())
+    manifest = json.loads((saved/'manifest.json').read_text(encoding='utf-8'))
     target = saved/manifest['files'][0]['path']
     target.write_bytes(b'tampered')
     with pytest.raises(ValueError,match='不完整'):

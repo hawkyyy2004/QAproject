@@ -59,7 +59,7 @@ def main():
             'median_seconds':{label:round(statistics.median(r['preparation_seconds'] for r in values),6)
                               for label,values in runs.items()}}
     path = folder/'report.json'
-    path.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({'report':str(path),'cases':{name:case['median_seconds'] for name,case in report['cases'].items()}},ensure_ascii=False))
 
 

@@ -19,7 +19,7 @@ class LocalEmbedder:
         from tokenizers import Tokenizer
         self.np = np
         directory = Path(directory)
-        manifest = json.loads((ROOT / 'config/embedding-model.json').read_text())
+        manifest = json.loads((ROOT / 'config/embedding-model.json').read_text(encoding='utf-8'))
         for name in ('model.onnx', 'tokenizer.json'):
             if hashlib.sha256((directory / name).read_bytes()).hexdigest() != manifest['files'][name]['sha256']:
                 raise ValueError('ModelHashMismatch')

@@ -10,6 +10,8 @@ sys.path.insert(0,str(ROOT/'src'))
 if __name__=='__main__':
     import uvicorn
     from qaproject.app import create_app
+    from qaproject.console import repair_streams
+    repair_streams()
     parser=argparse.ArgumentParser(description='启动 QAproject 本地初版')
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--no-browser',action='store_true')
