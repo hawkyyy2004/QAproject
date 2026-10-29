@@ -1151,7 +1151,15 @@ class Worker:
                     db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc['id'],'run_interrupted',
                         encode({'run_id':run_id,'stage':current_stage,'seconds':round(time.perf_counter()-started,2)}),time.time()))
                 return
-            message = str(error) if isinstance(error,ValueError) else '内部处理失败；已保留证据及候选，可重试继续。'
+            if isinstance(error,ValueError):
+                message = str(error)
+            else:
+                message = '内部处理失败；已保留证据及候选，可重试继续。'
+                # Show the native SQLite code so a retry can tell readonly from
+                # locked from a full disk without exposing the raw message.
+                code = sqlite_diagnostics(error).get('sqlite_errorname','')
+                if code:
+                    message = f'内部处理失败（数据库 {code}）；已保留证据及候选，可重试继续。'
             store.event(doc['id'], 'run_failed', {'run_id':run_id,'stage':current_stage,'error':message,
                                                 'error_type':type(error).__name__,**sqlite_diagnostics(error),
                                                 'seconds':round(time.perf_counter()-started,2),'timings':timings})

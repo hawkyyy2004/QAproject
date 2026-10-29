@@ -180,7 +180,13 @@ def process_revision(store, task, worker, call, check_duplicates):
             except ValueError:
                 return
             # Provider errors are already sanitized by the company adapter.
-            note = str(error) if isinstance(error,ValueError) else '修改审核失败，正式内容已保留，请重试。'
+            if isinstance(error,ValueError):
+                note = str(error)
+            else:
+                note = '修改审核失败，正式内容已保留，请重试。'
+                code = sqlite_diagnostics(error).get('sqlite_errorname','')
+                if code:
+                    note = f'修改审核失败（数据库 {code}），正式内容已保留，请重试。'
             db.execute("UPDATE qa_revisions SET status='failed',note=?,review=?,updated=? WHERE id=?",(note,encode(check),time.time(),revision_id))
             db.execute("UPDATE tasks SET status='failed',stage='qa_revision' WHERE id=?",(task['id'],))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),task['document_id'],'qa_revision_failed',

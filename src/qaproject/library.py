@@ -12,7 +12,9 @@ from .store import digest, uid
 from .settings import ROOT
 from .sqlite_support import initialize_journal
 
-FORMATS = {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv'}
+# Keep this in step with the upload whitelist in app.py, or data files are
+# visible on disk but missing from "从资料库选择".
+FORMATS = {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4'}
 
 
 class LibraryIndex:
@@ -180,7 +182,7 @@ class LibraryIndex:
             row.pop('registered_version',None)
         return dict(state,items=rows,page=page,pages=pages,total=total)
 
-    def import_entry(self, entry_id, version, max_bytes):
+    def import_entry(self, entry_id, version, max_bytes, netcdf_bytes=None):
         if not self.root:
             raise ValueError('尚未配置服务器资料目录；本机上传仍可使用。')
         with self.connect() as db:
@@ -190,7 +192,10 @@ class LibraryIndex:
         path = self.root/row['relative_path']
         if path.is_symlink() or path.resolve()!=path or not path.is_file() or not path.is_relative_to(self.root):
             raise ValueError('原件位置已变化或目录不可用，请刷新资料库。')
-        if path.suffix.lower() not in FORMATS or not 0<path.stat().st_size<=max_bytes:
+        # Gridded climate files are routinely hundreds of MB; the reader samples
+        # slices, so they get the same allowance as an upload.
+        limit = netcdf_bytes if netcdf_bytes and path.suffix.lower() in {'.nc', '.nc4'} else max_bytes
+        if path.suffix.lower() not in FORMATS or not 0<path.stat().st_size<=limit:
             raise ValueError('原件为空、格式不支持或超出文件大小限制。')
         before = signature(path)
         if before!=version:

@@ -157,7 +157,9 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         for entry in body.files:
             started=time.perf_counter()
             try:
-                results.append(library.import_entry(entry.id,entry.version,settings()['max_file_mb']*1024*1024))
+                limits=settings()
+                results.append(library.import_entry(entry.id,entry.version,limits['max_file_mb']*1024*1024,
+                                                    int(limits.get('max_netcdf_mb',2048))*1024*1024))
             except (ValueError,OSError) as error:
                 stores['live'].event(None,'library_import_failed',{'entry_id':entry.id,'stage':'registration',
                     'error_type':type(error).__name__,'seconds':round(time.perf_counter()-started,6)})

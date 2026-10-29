@@ -129,17 +129,30 @@ def test_nested_analysis_and_files_share_request_ceiling(tmp_path, monkeypatch, 
         store.update_document(doc, units=units)
     lock = threading.Lock()
     active = peak = 0
-    original = None
+    peer = threading.Event()
+    holds = 0
     calls, _ = provider(monkeypatch)
     original = GLMClient.call
 
     def measured(*args, **kwargs):
-        nonlocal active, peak
+        nonlocal active, peak, holds
+        hold = False
         with lock:
             active += 1
             peak = max(peak,active)
+            if active==2:
+                peer.set()
+            # With two request slots the overlap has to be observable no matter
+            # how long the surrounding database work takes on this machine, so
+            # the first request holds its slot until a peer arrives.
+            hold = request_limit==2 and active==1 and peak<2 and holds<3
+            if hold:
+                holds += 1
         try:
-            time.sleep(.015)  # Simulated provider delay exercises overlapping in-flight requests.
+            if hold:
+                assert peer.wait(2), 'two file tasks must overlap inside the request ceiling'
+            else:
+                time.sleep(.015)  # Simulated provider delay.
             return original(*args,**kwargs)
         finally:
             with lock:

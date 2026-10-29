@@ -118,6 +118,7 @@ def test_pipeline_records_extended_sqlite_code_without_raw_message(setup_pipelin
     behavior['analysis']=fail
     doc=run(setup_pipeline)
     assert doc['status']=='failed' and 'secret' not in doc['error']
+    assert 'SQLITE_READONLY_DBMOVED' in doc['error']
     with store.connect() as db:
         event=json.loads(db.execute("SELECT detail FROM events WHERE kind='run_failed'").fetchone()[0])
     assert event['sqlite_errorname']=='SQLITE_READONLY_DBMOVED'
