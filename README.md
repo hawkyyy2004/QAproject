@@ -1,6 +1,6 @@
 # QAproject：GLM 本地多模态语料处理系统开发方案
 
-> 项目版本：v27 · 文档版本：0.28 · 更新日期：2026-10-30<br>
+> 项目版本：v28 · 文档版本：0.29 · 更新日期：2026-10-30<br>
 > 当前状态：本地初版已可运行，已具备三个页面模块，公司 GLM 文本/实际图片调用已验证；本地轻量主题语义搜索已接入；服务器部署、完整发布包与 500 篇验收尚未完成。<br>
 > 本目录是新项目的开发根目录。后续代码、配置、提示词、测试、说明、构建与运行产物均在 `QAproject/` 内管理。
 
@@ -1421,3 +1421,9 @@ v25修掉了“GBK解码抛异常”本身，但同事原报的另外两半仍�
 - 上一版只在`run.py`与`scripts/mineru_layout.py`两处调用了`repair_streams()`，其余诊断脚本（`scripts/check_*.py`、`benchmark_document.py`等）以及同事自己写的临时脚本仍会在中文Windows上抛`UnicodeEncodeError`。复现：`PYTHONIOENCODING=gbk`下打印`NO3⁻`、`µmol`即崩，GBK中没有上下标字符。
 - 修复：`qaproject/__init__.py`在包导入时调用`repair_streams()`。任何`import qaproject`的脚本自动获得`errors=replace`的输出，无需各自记得加；`mineru_parse_worker.py`运行在MinerU虚拟环境、不导入本项目，保留自己的内联处理。
 - 验证（2026-10-30，Windows）：新增用例断言“仅import qaproject即可安全打印上下标”；在`PYTHONIOENCODING=gbk`、`PYTHONUTF8=0`下整段跑PDF+CSV解析，退出码0、中文与提示条正常落库（终端显示的乱码是PowerShell按UTF-8解读GBK字节所致，非程序问题）；全套`pytest -q` 292项通过、2项跳过。
+
+### 21.32 未配置密钥时的界面指引（2026-10-30，v28）
+
+- 新拉取项目的人在本机没有`.env.local`，界面右上角只显示"密钥：未配置"，其余没有说明。现在该弹窗在未配置时多一行指引：在项目根目录的`.env.local`中填写`API_KEY=你的密钥`后重启服务，密钥只保存在本机、不随代码分发。
+- 分发约束复核（2026-10-30）：`.env.local`由`.gitignore`的`.env.*`排除，`git ls-files`确认未被跟踪；对全部提交历史执行`git grep "sk-[A-Za-z0-9]{20,}"`无命中，工作区亦无命中，说明从v20起的任何一次提交都没有带过密钥；`config/env.local.example`的`API_KEY=`保持为空模板。用`git archive HEAD`导出干净副本实测：无`.env.local`，`api_key()`为空串，另一端口起服务返回`key_configured=false`，界面提示按上述指引填写。
+- 验证（2026-10-30，Windows）：`node --check web/app.js`通过；`test_encoding`、`test_prototype`18项通过。本机`.env.local`已换为新密钥，`/api/bootstrap`返回`key_configured=true`，真实接口两次冒烟调用均HTTP 200（第二次返回正文"海水温度的常用单位是摄氏度（°C）……"）。
