@@ -25,5 +25,6 @@ def repair_streams():
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors='replace')
-        except (AttributeError, ValueError):
+        except (AttributeError, ValueError, OSError):
+            # Pytest capture objects and redirected files vary; never fail here.
             pass

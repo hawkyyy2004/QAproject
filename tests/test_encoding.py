@@ -105,3 +105,17 @@ def test_script_progress_survives_a_gbk_console():
     done = subprocess.run([sys.executable, '-c', code], capture_output=True,
                           env=dict(child_env({'PATH': str(Path(sys.executable).parent)}), PYTHONIOENCODING='gbk'))
     assert done.returncode == 0, done.stderr[-400:]
+
+
+def test_importing_the_package_alone_makes_printing_safe():
+    # Diagnostic scripts import qaproject and print; they must not need to know
+    # about repair_streams() to survive a GBK console.
+    code = (
+        f'import sys; sys.path.insert(0, {str(ROOT / "src")!r})\n'
+        'import qaproject\n'
+        "print('NO\\u2083\\u207b \\u00b5mol kg\\u207b\\u00b9 \\u2103')\n"
+    )
+    done = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                          env=dict(child_env({'PATH': str(Path(sys.executable).parent)}), PYTHONIOENCODING='gbk'))
+    assert done.returncode == 0, done.stderr[-400:]
+    assert done.stdout

@@ -1,6 +1,6 @@
 # QAproject：GLM 本地多模态语料处理系统开发方案
 
-> 项目版本：v26 · 文档版本：0.27 · 更新日期：2026-10-29<br>
+> 项目版本：v27 · 文档版本：0.28 · 更新日期：2026-10-30<br>
 > 当前状态：本地初版已可运行，已具备三个页面模块，公司 GLM 文本/实际图片调用已验证；本地轻量主题语义搜索已接入；服务器部署、完整发布包与 500 篇验收尚未完成。<br>
 > 本目录是新项目的开发根目录。后续代码、配置、提示词、测试、说明、构建与运行产物均在 `QAproject/` 内管理。
 
@@ -1415,3 +1415,9 @@ v25修掉了“GBK解码抛异常”本身，但同事原报的另外两半仍�
 - **其余读文件点补齐UTF-8**：`store.load_json()`统一读项目自写的JSON（应答缓存、拆分计划、`config/embedding-model.json`），`semantic.py`、`embedding.py`、各`scripts/check_*.py`与相关测试的`read_text()/write_text()`全部显式指定编码，测试侧写读成对修改，避免在cp936机器上自相矛盾。
 - **整页回退留痕**（v25遗留的“界面无提示”）：`documents`新增`layout_note`列并自动迁移，`parsers.py`在`auto`模式下把`prepare()`返回的原因落库；文件列表行与详情页提示条直接显示`未找到可用的 MinerU 解释器，保留整页`、`MinerU 未生成清单，保留整页：…`，清单可用或`pdf_layout=off`时自动清空。
 - **验证（2026-10-29，Windows）**：新增`tests/test_encoding.py`7项（子进程环境开关、UTF-8读取与GBK解码必然失败对照、探活参数固定、失败缓存与TTL重探、解释器缺失、GBK控制台打印）；`test_layout_manifest.py`断言整页回退写入`layout_note`、清单可用后清空；`test_store_migrations.py`纳入新列；全套`pytest -q` 291项通过、2项跳过。用故意配错的`mineru.python`端到端复跑：单页PDF照常出证据，`layout_note`为`未找到可用的 MinerU 解释器，保留整页`；`scripts/mineru_layout.py`改为中文提示退出而非堆栈。未调用真实GLM，未改动正式资料。
+
+### 21.31 手动脚本在GBK控制台下也会打印失败（2026-10-30，v27）
+
+- 上一版只在`run.py`与`scripts/mineru_layout.py`两处调用了`repair_streams()`，其余诊断脚本（`scripts/check_*.py`、`benchmark_document.py`等）以及同事自己写的临时脚本仍会在中文Windows上抛`UnicodeEncodeError`。复现：`PYTHONIOENCODING=gbk`下打印`NO3⁻`、`µmol`即崩，GBK中没有上下标字符。
+- 修复：`qaproject/__init__.py`在包导入时调用`repair_streams()`。任何`import qaproject`的脚本自动获得`errors=replace`的输出，无需各自记得加；`mineru_parse_worker.py`运行在MinerU虚拟环境、不导入本项目，保留自己的内联处理。
+- 验证（2026-10-30，Windows）：新增用例断言“仅import qaproject即可安全打印上下标”；在`PYTHONIOENCODING=gbk`、`PYTHONUTF8=0`下整段跑PDF+CSV解析，退出码0、中文与提示条正常落库（终端显示的乱码是PowerShell按UTF-8解读GBK字节所致，非程序问题）；全套`pytest -q` 292项通过、2项跳过。
