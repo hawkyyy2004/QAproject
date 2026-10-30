@@ -119,7 +119,7 @@ function pairedCards(candidates,d){
     versions.sort((a,b)=>(a.row.language==='zh'?0:1)-(b.row.language==='zh'?0:1));
     const paired=Boolean(versions[0].pair_id);
     const complete=paired&&versions.length===2&&new Set(versions.map(c=>c.row.language)).size===2;
-    return `<section class="qa-pair"><div class="pair-heading">${paired?'双语组':'历史单语'} ${String(i+1).padStart(2,'0')}<span>${complete?(versions.some(c=>c.status==='rejected')?'一版已排除，双语未完整入库':'中文 / English · 同一知识点'):paired?'双语版本缺失，需检查':'未自动补译，不计入双语目标'}</span></div><div class="qa-versions">${versions.map(c=>candidateCard(c,i,d)).join('')}</div></section>`;
+    return `<section class="qa-pair"><div class="pair-heading">${paired?'双语组':'历史单语'} ${String(i+1).padStart(2,'0')}${complete&&!versions.some(c=>c.status==='rejected')?'':`<span>${complete?'一版已排除，双语未完整入库':paired?'双语版本缺失，需检查':'未自动补译，不计入双语目标'}</span>`}</div><div class="qa-versions">${versions.map(c=>candidateCard(c,i,d)).join('')}</div></section>`;
   }).join('');
 }
 function evidenceCard(u){
