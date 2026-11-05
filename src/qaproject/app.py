@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 import time
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, HTTPException, Query
@@ -22,6 +23,7 @@ from .execution import ExecutionLimits, execution_config
 from .conflicts import EditConflict
 from .library import LibraryIndex
 from .persistence import RuntimeLease
+from . import knowledge
 
 
 class CommitBody(BaseModel):
@@ -152,14 +154,17 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         return library.request_refresh()
 
     @app.post('/api/library/imports')
-    def library_import(body:LibraryImport):
+    def library_import(body:LibraryImport,processing:Literal['qa','knowledge','both']='qa'):
         results=[]
         for entry in body.files:
             started=time.perf_counter()
             try:
                 limits=settings()
-                results.append(library.import_entry(entry.id,entry.version,limits['max_file_mb']*1024*1024,
-                                                    int(limits.get('max_netcdf_mb',2048))*1024*1024))
+                result=library.import_entry(entry.id,entry.version,limits['max_file_mb']*1024*1024,
+                    int(limits.get('max_netcdf_mb',2048))*1024*1024,
+                    task_stage='knowledge' if processing=='knowledge' else 'queued')
+                schedule_processing(stores['live'],result['id'],result['created'],processing)
+                results.append(result)
             except (ValueError,OSError) as error:
                 stores['live'].event(None,'library_import_failed',{'entry_id':entry.id,'stage':'registration',
                     'error_type':type(error).__name__,'seconds':round(time.perf_counter()-started,6)})
@@ -196,7 +201,7 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         return searches[mode].recommend(q)
 
     @app.post('/api/imports')
-    async def imports(request:Request,mode='live'):
+    async def imports(request:Request,mode='live', processing:Literal['qa','knowledge','both']='qa'):
         store=workspace(mode)
         # Multipart data is streamed by Starlette into a temporary spool, then bounded per file.
         form=await request.form(max_files=50,max_fields=5)
@@ -215,9 +220,17 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
             data=await file.read(limit+1)
             if not data or len(data)>limit:
                 results.append({'name':file.filename,'error':'文件为空或超出大小限制'});continue
-            doc_id,created=store.import_file(file.filename,data,mode)
+            doc_id,created=store.import_file(file.filename,data,mode,
+                                           task_stage='knowledge' if processing=='knowledge' else 'queued')
+            schedule_processing(store,doc_id,created,processing)
             results.append({'id':doc_id,'name':file.filename,'created':created})
         return results
+
+    def schedule_processing(store,doc_id,created,processing):
+        if processing=='both' or (processing=='knowledge' and not created):
+            knowledge.enqueue(store,doc_id)
+        if processing in {'qa','both'} and not created:
+            store.ensure_qa_task(doc_id)
 
     @app.get('/api/assets/{asset_id}')
     def asset(asset_id,mode='live'):
@@ -287,7 +300,7 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         if doc['status']!='failed': raise HTTPException(400,'仅失败任务可重试')
         store.event(doc_id, 'retry_requested', {'previous_error':doc['error'], 'previous_seconds':doc['seconds'], 'timings':doc['timings']})
         with store.connect() as db:
-            db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0 WHERE document_id=? AND status='failed'",(doc_id,))
+            db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0 WHERE document_id=? AND status='failed' AND initial_stage!='knowledge'",(doc_id,))
         store.update_document(doc_id,status='queued',error='')
         return {'queued':True}
 
@@ -307,6 +320,43 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
             db.execute("UPDATE documents SET status='queued',progress='等待修订未通过的问答并重新审核' WHERE id=?",(doc_id,))
             db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc_id,'optimization_requested','{}',time.time()))
         return {'queued':True}
+
+    @app.get('/api/knowledge')
+    def knowledge_list(mode='live',q:str=Query('',max_length=200),entity_type='',topic='',
+                       document_id='',
+                       page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):
+        return knowledge.listing(workspace(mode),q,entity_type,topic,'approved',document_id,page,page_size)
+
+    @app.get('/api/knowledge/jobs')
+    def knowledge_jobs(mode='live',q:str=Query('',max_length=200),page:int|None=Query(None,ge=1),
+                       page_size:int=Query(20,ge=1,le=100)):
+        result=knowledge.jobs(workspace(mode),q,page or 1,page_size)
+        return result if page is not None else result['items']
+
+    @app.get('/api/knowledge/jobs/{doc_id}')
+    def knowledge_job_detail(doc_id,mode='live'):
+        result=knowledge.jobs(workspace(mode),document_id=doc_id)
+        if not result['items']:raise HTTPException(404,'知识条目处理记录不存在')
+        return result['items'][0]
+
+    @app.post('/api/documents/{doc_id}/knowledge')
+    def knowledge_extract(doc_id,mode='live'):
+        if mode!='live':raise HTTPException(400,'请在真实资料中整理知识条目')
+        return knowledge.enqueue(workspace(mode),doc_id)
+
+    @app.post('/api/documents/{doc_id}/qa')
+    def start_qa(doc_id,mode='live'):
+        if mode!='live':raise HTTPException(400,'请在真实资料中生成 QA')
+        return workspace(mode).ensure_qa_task(doc_id)
+
+    @app.get('/api/knowledge/export')
+    def knowledge_export(mode='live',q:str=Query('',max_length=200),entity_type='',topic='',document_id=''):
+        content=knowledge.export_csv(workspace(mode),q=q,entity_type=entity_type,topic=topic,document_id=document_id)
+        return Response(content,media_type='text/csv',headers={'Content-Disposition':'attachment; filename="knowledge.csv"'})
+
+    @app.get('/api/knowledge/{entry_id}')
+    def knowledge_detail(entry_id,mode='live'):
+        return knowledge.detail(workspace(mode),entry_id)
 
     @app.get('/api/qas')
     def qa_list(mode='live',page:int=Query(1,ge=1),page_size:int=Query(20,ge=1,le=100)):

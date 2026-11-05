@@ -182,7 +182,7 @@ class LibraryIndex:
             row.pop('registered_version',None)
         return dict(state,items=rows,page=page,pages=pages,total=total)
 
-    def import_entry(self, entry_id, version, max_bytes, netcdf_bytes=None):
+    def import_entry(self, entry_id, version, max_bytes, netcdf_bytes=None, task_stage='queued'):
         if not self.root:
             raise ValueError('尚未配置服务器资料目录；本机上传仍可使用。')
         with self.connect() as db:
@@ -203,7 +203,7 @@ class LibraryIndex:
         h = row['content_hash'] if row['registered_version']==before and row['content_hash'] else file_hash(path)
         if signature(path)!=before:
             raise ValueError('读取期间原件发生变化，请稍后重试。')
-        doc_id,created = self.store.import_reference(path,h,str(self.root),before)
+        doc_id,created = self.store.import_reference(path,h,str(self.root),before,task_stage=task_stage)
         with self.connect() as db:
             db.execute('UPDATE entries SET document_id=?,registered_version=?,content_hash=? WHERE id=?',
                        (doc_id,before,h,entry_id))

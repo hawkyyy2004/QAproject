@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>QAproject · 语料工作台</title>
-  <link rel="stylesheet" href="/style.css?v=20261030-ocean-gradient">
+  <link rel="stylesheet" href="/style.css?v=20261105-inline-filters">
 </head>
 <body>
   <aside class="sidebar">
     <a class="brand" href="#files"><span class="brand-mark">Q<span>↗</span></span><span>QAproject<small>语料处理工作台</small></span></a>
     <div class="nav-caption">工作空间</div>
-    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button></nav>
+    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button><button class="nav-item" data-view="knowledge"><span data-icon="topic"></span>知识条目汇总</button></nav>
   </aside>
   <div class="workspace">
     <header class="topbar"><h2 class="module-title" id="crumb">文件处理</h2><button class="connection" id="connection"><span class="green-dot"></span><span id="connection-text">正在连接本地服务</span><span data-icon="chevron"></span></button></header>
@@ -18,17 +18,29 @@
         <div class="stats" id="stats"></div>
         <section class="upload-card" id="drop-zone">
           <div class="upload-visual"><div class="paper paper-back"></div><div class="paper paper-front"><span data-icon="upload"></span><i></i><i></i></div><span class="plus-bubble">+</span></div>
-          <div class="upload-copy"><div class="upload-title">文件解析</div><p>选择或拖拽文件到此处，支持jpg、png、pdf、csv、nc文件</p></div>
+          <div class="upload-copy"><div class="upload-title">文件解析</div><p>选择或拖拽文件到此处，支持jpg、png、pdf、csv、nc文件</p><label class="processing-choice"><span class="processing-label">处理方式</span><select id="processing-kind" aria-label="处理方式"><option value="qa">生成QA对</option><option value="knowledge">整理知识条目</option><option value="both">QA&amp;知识条目</option></select></label></div>
           <div class="upload-action"><div class="upload-buttons"><button class="button primary" id="choose-files"><span data-icon="plus"></span>选择文件</button><button class="button secondary" id="choose-library">从资料库选择</button></div></div>
           <input id="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.csv,.tsv,.nc,.nc4" multiple hidden>
         </section>
         <p id="upload-status" class="operation-status" role="status" aria-live="polite" hidden></p>
         <p id="queue-status" class="queue-status" role="status"></p>
-        <section class="table-card"><div class="section-toolbar"><div><h2>处理记录 <span id="document-count">0</span></h2><p>点击文件，查看梗概、原始证据和六字段问答。</p></div><div class="toolbar-actions"><div class="small-search"><span data-icon="search"></span><input id="file-filter" placeholder="查找文件名称" aria-label="查找文件名称"></div><button class="button secondary" id="export-all"><span data-icon="download"></span>导出 QA</button></div></div><div class="table-scroll"><table><thead><tr><th>文件与梗概</th><th>正式主题</th><th>处理状态</th><th>QA</th><th></th></tr></thead><tbody id="document-rows"></tbody></table></div><div class="table-footer"><span id="table-footnote">演示资料与真实资料独立保存</span><span><span class="green-dot"></span>数据持久保存</span></div></section>
+        <section class="table-card"><div class="section-toolbar"><div><h2>处理记录 <span id="document-count">0</span></h2><p id="processing-description">点击文件，查看梗概、原始证据和六字段问答。</p></div><div class="toolbar-actions"><div class="small-search"><span data-icon="search"></span><input id="file-filter" placeholder="查找文件名称" aria-label="查找文件名称"></div><button class="button secondary" id="export-all"><span data-icon="download"></span>导出 QA</button></div></div><div class="processing-tabs" role="tablist" aria-label="处理记录类型"><button id="qa-records-tab" type="button" role="tab" aria-selected="true" aria-controls="qa-records-panel" data-processing-tab="qa" class="active">QA生成</button><button id="knowledge-records-tab" type="button" role="tab" aria-selected="false" aria-controls="knowledge-records-panel" data-processing-tab="knowledge" tabindex="-1">知识条目整理</button></div><div id="qa-records-panel" role="tabpanel" aria-labelledby="qa-records-tab"><div class="table-scroll"><table><thead><tr><th>文件与梗概</th><th>正式主题</th><th>处理状态</th><th>QA</th><th></th></tr></thead><tbody id="document-rows"></tbody></table></div><div class="table-footer"><span id="table-footnote">演示资料与真实资料独立保存</span><span><span class="green-dot"></span>数据持久保存</span></div></div><div id="knowledge-records-panel" role="tabpanel" aria-labelledby="knowledge-records-tab" hidden><div class="table-scroll" tabindex="0" aria-label="知识条目处理记录"><table class="knowledge-processing-table"><thead><tr><th>文件名称</th><th>处理状态</th><th>知识条目</th><th>操作</th></tr></thead><tbody id="knowledge-job-rows"></tbody></table></div><div class="table-footer"><span id="knowledge-jobs-page-info" role="status"></span><div><button class="button ghost" id="knowledge-jobs-prev">上一页</button><button class="button ghost" id="knowledge-jobs-next">下一页</button></div></div></div></section>
       </section>
       <section id="search-view" hidden>
         <section class="search-hero"><div class="search-symbol" data-icon="search"></div><h2>搜索主题</h2><div class="search-controls"><div class="search-input-wrap"><span data-icon="search"></span><input id="theme-query" placeholder="输入主题名称、简称或具体关键词" aria-label="搜索主题"></div><button id="search-button" class="button primary">搜索</button></div><p id="search-status" class="operation-status" role="status" aria-live="polite" hidden></p></section>
         <div class="search-summary"><h2 id="search-summary">主题与涵盖文件</h2><span>主题归类与细分方向分别保存</span></div><div id="search-results"></div><section id="semantic-section" class="semantic-section" hidden aria-live="polite"><div class="semantic-heading"><h2>您可能想搜</h2><span>相似主题</span></div><p id="semantic-status"></p><div id="semantic-results"></div></section>
+      </section>
+      <section id="knowledge-view" hidden>
+        <section class="table-card">
+          <div class="section-toolbar"><div><h2>知识条目 <span id="knowledge-total">0</span></h2><p>名称、解释与原文来源独立保存 · 仅审核通过的条目可导出</p></div><div class="toolbar-actions"><button class="button secondary" id="knowledge-refresh">刷新</button><button class="button primary" id="knowledge-export"><span data-icon="download"></span>导出文件</button></div></div>
+          <form id="knowledge-filters" class="knowledge-filters">
+            <label class="knowledge-control knowledge-query-control"><span class="filter-label">搜索条目</span><span class="knowledge-input-wrap"><span data-icon="search"></span><input id="knowledge-query" placeholder="实体名称或解释" aria-label="搜索知识条目"></span></label>
+            <label class="knowledge-control"><span class="filter-label">实体类型</span><select id="knowledge-type" aria-label="实体类型"><option value="">全部实体类型</option></select></label>
+            <button class="button secondary knowledge-search-button" type="submit">搜索</button>
+          </form>
+          <div class="table-scroll" tabindex="0" aria-label="知识条目表格，窄屏可横向滚动"><table class="knowledge-table"><thead><tr><th><span class="field-name-en">entity_name</span><span class="field-name-zh">实体名称</span></th><th><span class="field-name-en">entity_type</span><span class="field-name-zh">实体类型</span></th><th><span class="field-name-en">entity_description</span><span class="field-name-zh">实体解释</span></th><th><span class="field-name-en">page_urls</span><span class="field-name-zh">来源网址</span></th><th><span class="field-name-en">page_titles</span><span class="field-name-zh">来源标题</span></th><th><span class="field-name-en">full_text</span><span class="field-name-zh">原文</span></th><th><span class="field-name-en">full_text_length</span><span class="field-name-zh">原文长度</span></th><th>操作</th></tr></thead><tbody id="knowledge-rows"></tbody></table></div>
+          <div class="table-footer"><span id="knowledge-page-info" role="status"></span><div><button class="button ghost" id="knowledge-prev">上一页</button><button class="button ghost" id="knowledge-next">下一页</button></div></div>
+        </section>
       </section>
       <section id="qas-view" hidden>
         <section class="table-card qa-summary-card">
@@ -44,7 +56,8 @@
   <div id="connection-popover" class="connection-popover" hidden></div>
   <dialog id="library-picker" class="qa-editor library-picker" aria-labelledby="library-title"><div class="drawer-head"><h2 id="library-title">从服务器资料库选择</h2><button id="library-close" class="icon-button" aria-label="关闭资料库">×</button></div><div class="drawer-body"><p id="library-status" role="status"></p><div class="library-toolbar"><input id="library-query" placeholder="搜索文件名称或目录" aria-label="搜索资料库"><button id="library-search" class="button secondary">搜索</button><button id="library-refresh" class="button ghost">更新目录</button></div><div class="table-scroll"><table><thead><tr><th>选择</th><th>资料名称</th><th>大小</th><th>状态</th></tr></thead><tbody id="library-rows"></tbody></table></div></div><div class="qa-editor-footer"><span id="library-page-info"></span><div><button id="library-prev" class="button ghost">上一页</button><button id="library-next" class="button ghost">下一页</button><button id="library-import" class="button primary" disabled>开始处理（0）</button></div></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <script src="/app.js?v=20261030-pair-label"></script>
-  <script src="/library.js?v=20261021-library2"></script>
+  <script src="/app.js?v=20261105-no-topic-filter"></script>
+  <script src="/library.js?v=20261103-processing"></script>
+  <script src="/knowledge.js?v=20261105-remove-topic"></script>
 </body>
 </html>

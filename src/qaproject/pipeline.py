@@ -349,6 +349,10 @@ class Worker:
     def process(self, task):
         if self.before_process:
             self.before_process()
+        if task.get('stage') == 'knowledge':
+            from .knowledge import process
+            process(self, task)
+            return
         store = self.store
         doc = store.document(task['document_id'])
         started = time.perf_counter()

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PureWindowsPath
 
 from .persistence import file_hash
 
@@ -16,6 +17,17 @@ def original_path(doc, workspace):
     base = Path(doc['source_root']) if doc.get('source_kind')=='library' else Path(workspace)/'originals'
     resolved = path.resolve()
     if not resolved.is_relative_to(base.resolve()) or not resolved.is_file():
+        # Uploaded originals can travel with an intact workspace. Resolve only
+        # the registered ID/name within this workspace, never search by filename
+        # or rewrite historical source/image strings.
+        registered=PureWindowsPath(doc['path']) if '\\' in doc['path'] else path
+        expected=('originals',doc.get('id'),doc.get('name'))
+        if doc.get('source_kind','upload')=='upload' and tuple(registered.parts[-3:])==expected:
+            candidate=(base/doc['id']/doc['name']).resolve()
+            if candidate.is_relative_to(base.resolve()) and candidate.is_file():
+                if file_hash(candidate)!=doc.get('content_hash'):
+                    raise ValueError('当前目录原件与登记内容不一致，未使用替代文件。')
+                return candidate
         raise ValueError('原始资料不存在或来源目录不可用。')
     if doc.get('source_kind')=='library' and resolved!=path:
         raise ValueError('资料库文件位置已变化，请重新选择资料。')

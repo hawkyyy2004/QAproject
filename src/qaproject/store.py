@@ -151,6 +151,20 @@ class Store:
             CREATE INDEX IF NOT EXISTS qa_revision_documents ON qa_revisions(document_id,created DESC,id DESC);
             CREATE INDEX IF NOT EXISTS qas_created ON qas(created DESC,id DESC);
             CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied REAL);
+            CREATE TABLE IF NOT EXISTS knowledge_jobs(
+              document_id TEXT PRIMARY KEY REFERENCES documents(id), task_id TEXT,
+              status TEXT NOT NULL, progress TEXT DEFAULT '', error TEXT DEFAULT '',
+              units TEXT DEFAULT '[]', updated REAL);
+            CREATE TABLE IF NOT EXISTS knowledge_entries(
+              id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id),
+              unit_id TEXT NOT NULL, evidence_hash TEXT NOT NULL, row_json TEXT NOT NULL,
+              row_hash TEXT NOT NULL, topic TEXT NOT NULL, quote TEXT NOT NULL,
+              status TEXT NOT NULL, review TEXT NOT NULL, created REAL,
+              UNIQUE(document_id,unit_id,row_hash));
+            CREATE INDEX IF NOT EXISTS knowledge_document ON knowledge_entries(document_id,created);
+            CREATE TABLE IF NOT EXISTS knowledge_batches(
+              document_id TEXT REFERENCES documents(id), signature TEXT, result TEXT NOT NULL,
+              PRIMARY KEY(document_id,signature));
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
             CREATE INDEX IF NOT EXISTS tasks_document_state ON tasks(document_id,status);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);
@@ -281,7 +295,7 @@ class Store:
             db.execute('INSERT OR IGNORE INTO topics VALUES(?,?,?,?)', (uid(), name.strip(), definition, '[]'))
         return next(t for t in self.topics() if t['name'] == name.strip())
 
-    def import_file(self, name, content, mode):
+    def import_file(self, name, content, mode, task_stage='queued'):
         h = hashlib.sha256(content).hexdigest()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -298,7 +312,12 @@ class Store:
             path.write_bytes(content)
             db.execute('INSERT INTO documents(id,content_hash,name,path,status,created,mode) VALUES(?,?,?,?,?,?,?)',
                        (doc_id, h, name, str(path), 'queued', time.time(), mode))
-            db.execute('INSERT INTO tasks(id,document_id,status) VALUES(?,?,?)', (uid(), doc_id, 'queued'))
+            task_id = uid()
+            db.execute('INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,?,?,?)',
+                       (task_id, doc_id, 'queued', task_stage, 'knowledge' if task_stage=='knowledge' else ''))
+            if task_stage == 'knowledge':
+                db.execute('INSERT INTO knowledge_jobs(document_id,task_id,status,updated) VALUES(?,?,?,?)',
+                           (doc_id,task_id,'queued',time.time()))
         return doc_id, True
 
     def document(self, doc_id):
@@ -333,7 +352,20 @@ class Store:
             candidate.pop('row_json', None)
         return item
 
-    def import_reference(self, path, content_hash, root, version):
+    def ensure_qa_task(self, doc_id):
+        """A knowledge-only import may subsequently enter the unchanged QA pipeline."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM documents WHERE id=?',(doc_id,)).fetchone():
+                raise ValueError('找不到文件')
+            old=db.execute("SELECT id,status FROM tasks WHERE document_id=? AND initial_stage!='knowledge' ORDER BY rowid LIMIT 1",(doc_id,)).fetchone()
+            if old:return dict(task_id=old['id'],status=old['status'])
+            task_id=uid()
+            db.execute("INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,'queued','queued','queued')",(task_id,doc_id))
+            db.execute("UPDATE documents SET status='queued',progress='等待生成双语 QA' WHERE id=?",(doc_id,))
+        return dict(task_id=task_id,status='queued')
+
+    def import_reference(self, path, content_hash, root, version, task_stage='queued'):
         """Register a selected library original without writing a second original."""
         path, root = Path(path), Path(root)
         if path.resolve()!=path or not path.is_file() or not path.is_relative_to(root):
@@ -353,7 +385,12 @@ class Store:
             doc_id = uid()
             db.execute('''INSERT INTO documents(id,content_hash,name,path,status,created,mode,source_kind,source_root,source_signature)
                 VALUES(?,?,?,?,?,?,?,?,?,?)''',(doc_id,content_hash,path.name,str(path),'queued',time.time(),'live','library',str(root),version))
-            db.execute('INSERT INTO tasks(id,document_id,status) VALUES(?,?,?)',(uid(),doc_id,'queued'))
+            task_id=uid()
+            db.execute('INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,?,?,?)',
+                       (task_id,doc_id,'queued',task_stage,'knowledge' if task_stage=='knowledge' else ''))
+            if task_stage=='knowledge':
+                db.execute("INSERT INTO knowledge_jobs(document_id,task_id,status,updated) VALUES(?,?,'queued',?)",
+                           (doc_id,task_id,time.time()))
             return doc_id,True
 
     def original(self, doc_id):
@@ -396,6 +433,9 @@ class Store:
             with self.connect() as db:
                 rows = db.execute('''SELECT d.id,d.name,d.status,substr(d.summary,1,500) AS summary,
                     d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,d.layout_note,
+                    (EXISTS(SELECT 1 FROM tasks t WHERE t.document_id=d.id AND t.initial_stage!='knowledge')
+                     OR EXISTS(SELECT 1 FROM candidates c WHERE c.document_id=d.id)
+                     OR NOT EXISTS(SELECT 1 FROM knowledge_jobs j WHERE j.document_id=d.id)) AS has_qa_tasks,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id AND c.status!='discarded') AS candidate_count,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id
                         AND c.status NOT IN ('approved','rejected','discarded')) AS pending_commit_count,

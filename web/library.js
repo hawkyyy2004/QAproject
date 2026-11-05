@@ -31,10 +31,10 @@ $('#library-import').onclick=async()=>{
   if(librarySubmitting||!librarySelection.size)return;
   librarySubmitting=true;librarySelectionChanged();
   try{
-    const result=await api('/api/library/imports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:[...librarySelection.values()]})});
+    const result=await api('/api/library/imports?processing='+encodeURIComponent($('#processing-kind').value),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:[...librarySelection.values()]})});
     const errors=result.filter(x=>x.error);
     toast(errors.length?`${result.length-errors.length} 份已登记；${errors.length} 份未导入，请刷新检查原件。`:`${result.length} 份资料已登记，后台将继续处理，关闭网页不影响任务。`);
-    librarySelection.clear();await refresh();await refreshQueue();
+    librarySelection.clear();await refresh();if($('#processing-kind').value==='knowledge')setProcessingTab('knowledge');await refreshQueue();
   }catch(e){toast(e.message)}finally{librarySubmitting=false;librarySelectionChanged();if($('#library-picker').open)loadLibrary()}
 };
 async function refreshQueue(){try{const q=await api('/api/queue');$('#queue-status').textContent=q.running||q.queued?`正在处理 ${q.running} 份 · 等待 ${q.queued} 份 · 关闭网页后后台继续处理`:''}catch(e){/* Keep existing file actions available when status refresh fails. */}}

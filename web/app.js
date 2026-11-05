@@ -3,11 +3,11 @@ const svg=name=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
 const esc=value=>String(value??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 const $=s=>document.querySelector(s);
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=svg(el.dataset.icon));
-let semanticTimer,uploading=false;
+let semanticTimer,uploading=false,processingTab='qa';
 const documentFeedback=new Map();
 const committingDocuments=new Set();
 let mode='live',view='files',documents=[],topics=[],bootstrap={},opened=null,toastTimer,searchTimer,refreshSeq=0,searchSeq=0,detailSeq=0;
-const labels={queued:'等待处理',parsing:'读取证据',analyzing:'分析主题',generating:'生成问答',reviewing:'核验依据',repairing:'修订问答',repair_reviewing:'复核修订',preflight:'入库校验',waiting_review:'待核对入库',insufficient:'证据不足',failed:'处理失败',completed:'已完成',completed_under_min:'已完成·数量不足',demo_complete:'演示已完成',parsed_demo:'演示仅解析'};
+const labels={queued:'等待处理',parsing:'读取证据',analyzing:'分析主题',generating:'生成问答',reviewing:'核验依据',repairing:'修订问答',repair_reviewing:'复核修订',preflight:'入库校验',waiting_review:'待核对入库',insufficient:'证据不足',failed:'处理失败',completed:'已完成',completed_under_min:'已完成·数量不足',knowledge_failed:'条目整理失败',knowledge_completed:'条目整理完成',demo_complete:'演示已完成',parsed_demo:'演示仅解析'};
 const statusClass=s=>s==='failed'?'failed':['waiting_review','insufficient','parsed_demo'].includes(s)?'pending':['parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight','queued'].includes(s)?'running':'';
 function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,6500)}
 function operationStatus(selector,message,kind='info'){
@@ -31,7 +31,7 @@ function candidateActionError(b,error){
 async function api(path,options={}){const join=path.includes('?')?'&':'?';const response=await fetch(path+join+'mode='+mode,{...options,headers:{'X-QA-Session':bootstrap.session,...options.headers}});if(!response.ok){let body=await response.json().catch(()=>({}));const error=Error(body.detail||'请求失败，请稍后再试。');error.status=response.status;throw error}return response.json()}
 function tag(t){const kind=t.name==='数学'?'math':t.name==='海洋能源'?'energy':'';return `<span class="tag ${kind}">${esc(t.name)}</span>`}
 function updateControls(){const demo=mode==='demo';$('#table-footnote').textContent=demo?'演示每份仅展示 3 条 QA，未按正式数量要求补题':'论文目标5–7组双语；独立图片最多2组，按实际内容生成；每组对应中英2条记录';$('#choose-files').innerHTML=svg('plus')+(demo?'体验文件解析':'选择文件');document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode))}
-function renderStats(){const active=topics.filter(t=>t.documents>0);const total=documents.reduce((n,d)=>n+d.qa_count,0);const stats=[['文件总数',documents.length,'份','files'],['正式主题',active.length,'个','topic'],['已入库 QA',total,'条','qa']];$('#stats').innerHTML=stats.map(([name,value,unit,icon])=>`<div class="stat"><div class="stat-label">${name}</div><div class="stat-icon">${svg(icon)}</div><div class="stat-bottom"><span class="stat-value">${value}</span><span class="stat-unit">${unit}</span></div></div>`).join('');$('#nav-count').textContent=documents.length;$('#document-count').textContent=documents.length;}
+function renderStats(){const active=topics.filter(t=>t.documents>0);const total=documents.reduce((n,d)=>n+d.qa_count,0);const stats=[['文件总数',documents.length,'份','files'],['正式主题',active.length,'个','topic'],['已入库 QA',total,'条','qa']];$('#stats').innerHTML=stats.map(([name,value,unit,icon])=>`<div class="stat"><div class="stat-label">${name}</div><div class="stat-icon">${svg(icon)}</div><div class="stat-bottom"><span class="stat-value">${value}</span><span class="stat-unit">${unit}</span></div></div>`).join('');$('#nav-count').textContent=documents.length;$('#document-count').textContent=documents.filter(d=>d.has_qa_tasks!==0).length;}
 function documentCommitButton(d){
   if(mode!=='live')return '';
   const busy=committingDocuments.has(d.id);
@@ -45,7 +45,7 @@ function documentCommitButton(d){
   const waiting=d.status==='failed'?'失败待重试':pending>0?'一键入库':'无待入库';
   return `<button class="button ghost file-commit" data-commit-document="${d.id}" aria-label="${esc(d.name)}" title="${title}" disabled>${waiting}</button>`;
 }
-function renderDocuments(){const term=$('#file-filter').value.trim().toLowerCase();const list=documents.filter(d=>d.name.toLowerCase().includes(term));$('#document-rows').innerHTML=list.length?list.map(d=>`<tr data-document="${d.id}" tabindex="0" role="button" aria-label="查看 ${esc(d.name)}"><td class="document-file-cell"><div class="file-cell"><div class="file-icon">${svg('files')}<span>${esc(d.name.split('.').pop().toUpperCase())}</span></div><div><div class="file-name">${esc(d.name)}</div><div class="file-summary">${esc(d.summary||d.error||'正在排队，完成后自动显示梗概与主题。')}</div><div class="file-meta">${d.pages?d.pages+' 页 · ':''}${d.unit_count} 个证据单元${d.seconds?' · '+d.seconds+' 秒':''}</div>${d.layout_note?`<div class="layout-note">${esc(d.layout_note)}</div>`:''}</div></div>${documentCommitButton(d)}${documentFeedback.has(d.id)?`<p class="operation-status file-operation-status" role="status" data-kind="${documentFeedback.get(d.id).kind}">${esc(documentFeedback.get(d.id).message)}</p>`:''}</td><td>${d.topics.map(tag).join('')||'<span style="color:#a5b2a8">待识别</span>'}</td><td><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span>${d.progress?`<div class="processing-progress">${esc(d.progress)}</div>`:''}</td><td><div class="qa-number">${d.qa_count} 条<small>${d.qa_pair_count} 组双语已入库 · ${d.candidate_count-d.qa_count>0?(d.candidate_count-d.qa_count)+' 条候选':'已入库'}</small></div></td><td><span class="arrow-button">↗</span></td></tr>`).join(''):`<tr><td colspan="5"><div class="empty-state"><strong>${term?'没有匹配的文件':'这里等待你的第一份资料'}</strong>${term?'换个文件名称试试。':'选择上方文件，或直接拖入 PDF 和图片。'}</div></td></tr>`;bindDocs($('#document-rows'));$('#document-rows').querySelectorAll('[data-commit-document]').forEach(b=>b.onclick=e=>{e.stopPropagation();commitDocument(b.dataset.commitDocument)})}
+function renderDocuments(){const term=$('#file-filter').value.trim().toLowerCase();const list=documents.filter(d=>d.has_qa_tasks!==0&&d.name.toLowerCase().includes(term));$('#document-rows').innerHTML=list.length?list.map(d=>`<tr data-document="${d.id}" tabindex="0" role="button" aria-label="查看 ${esc(d.name)}"><td class="document-file-cell"><div class="file-cell"><div class="file-icon">${svg('files')}<span>${esc(d.name.split('.').pop().toUpperCase())}</span></div><div><div class="file-name">${esc(d.name)}</div><div class="file-summary">${esc(d.summary||d.error||'正在排队，完成后自动显示梗概与主题。')}</div><div class="file-meta">${d.pages?d.pages+' 页 · ':''}${d.unit_count} 个证据单元${d.seconds?' · '+d.seconds+' 秒':''}</div>${d.layout_note?`<div class="layout-note">${esc(d.layout_note)}</div>`:''}</div></div>${documentCommitButton(d)}${documentFeedback.has(d.id)?`<p class="operation-status file-operation-status" role="status" data-kind="${documentFeedback.get(d.id).kind}">${esc(documentFeedback.get(d.id).message)}</p>`:''}</td><td>${d.topics.map(tag).join('')||'<span style="color:#a5b2a8">待识别</span>'}</td><td><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span>${d.progress?`<div class="processing-progress">${esc(d.progress)}</div>`:''}</td><td><div class="qa-number">${d.qa_count} 条<small>${d.qa_pair_count} 组双语已入库 · ${d.candidate_count-d.qa_count>0?(d.candidate_count-d.qa_count)+' 条候选':'已入库'}</small></div></td><td><span class="arrow-button">↗</span></td></tr>`).join(''):`<tr><td colspan="5"><div class="empty-state"><strong>${term?'没有匹配的文件':'这里等待你的第一份资料'}</strong>${term?'换个文件名称试试。':'选择上方文件，或直接拖入 PDF 和图片。'}</div></td></tr>`;bindDocs($('#document-rows'));$('#document-rows').querySelectorAll('[data-commit-document]').forEach(b=>b.onclick=e=>{e.stopPropagation();commitDocument(b.dataset.commitDocument)})}
 function bindDocs(root){root.querySelectorAll('[data-document]').forEach(el=>{el.onclick=()=>openDocument(el.dataset.document);el.onkeydown=e=>{if(e.key==='Enter'&&e.target===el)openDocument(el.dataset.document)}})}
 async function commitDocument(id){
   if(committingDocuments.has(id))return;
@@ -57,20 +57,22 @@ async function commitDocument(id){
     await refresh();
   }catch(e){documentFeedback.set(id,{message:e.message+' 请重试。',kind:'error'});toast(e.message)}finally{committingDocuments.delete(id);renderDocuments()}
 }
-async function refresh(){const expectedMode=mode,seq=++refreshSeq;try{const result=await Promise.all([api('/api/documents?summary_only=true'),api('/api/topics')]);if(expectedMode!==mode||seq!==refreshSeq)return;[documents,topics]=result;renderStats();renderDocuments()}catch(e){if(expectedMode===mode)toast(e.message)}}
+async function refresh(){const expectedMode=mode,seq=++refreshSeq;try{const result=await Promise.all([api('/api/documents?summary_only=true'),api('/api/topics')]);if(expectedMode!==mode||seq!==refreshSeq)return;[documents,topics]=result;renderStats();renderDocuments();if(view==='files'&&processingTab==='knowledge')await loadKnowledgeJobs()}catch(e){if(expectedMode===mode)toast(e.message)}}
 function setView(next){
-  view=['files','search','qas'].includes(next)?next:'files';
-  for(const key of ['files','search','qas'])$('#'+key+'-view').hidden=view!==key;
+  view=['files','search','knowledge','qas'].includes(next)?next:'files';
+  for(const key of ['files','search','knowledge','qas'])$('#'+key+'-view').hidden=view!==key;
   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
-  const names={files:'文件处理',search:'主题模糊搜索',qas:'QA汇总'};
+  const names={files:'文件处理',search:'主题模糊搜索',qas:'QA汇总',knowledge:'知识条目汇总'};
   $('#crumb').textContent=names[view];
   if(view==='search')runSearch();
   if(view==='qas')loadQAs();
+  if(view==='knowledge')loadKnowledge();
+  if(view==='files'&&processingTab==='knowledge')loadKnowledgeJobs();
   location.hash=view;
 }
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=async()=>{mode=b.dataset.mode;documents=[];topics=[];++searchSeq;closeDrawer();updateControls();renderStats();renderDocuments();await refresh();if(view==='search')runSearch()});
-$('#file-filter').oninput=renderDocuments;
+$('#file-filter').oninput=()=>{if(processingTab==='knowledge'){knowledgeJobsPage=1;loadKnowledgeJobs()}else renderDocuments()};
 $('#choose-files').onclick=()=>$('#file-input').click();
 $('#file-input').onchange=e=>upload(e.target.files);
 async function upload(files){
@@ -80,10 +82,10 @@ async function upload(files){
   uploading=true;const button=$('#choose-files');button.disabled=true;button.textContent='上传中…';$('#drop-zone').setAttribute('aria-busy','true');
   operationStatus('#upload-status',`正在上传 ${selected.length} 份文件，请稍候…`);
   try{
-    const result=await api('/api/imports',{method:'POST',body:form});
+    const result=await api('/api/imports?processing='+encodeURIComponent($('#processing-kind').value),{method:'POST',body:form});
     const errors=result.filter(r=>r.error),created=result.filter(r=>r.created).length,reused=result.filter(r=>r.created===false&&!r.error).length;
     const message=`${created} 份已加入处理队列${reused?`，${reused} 份重复内容已复用`:''}。`+(errors.length?'未导入：'+errors.map(e=>e.name+'：'+e.error).join('；'):'处理完成后会自动更新列表。');
-    operationStatus('#upload-status',message,errors.length?'error':'success');toast(message);await refresh();
+    operationStatus('#upload-status',message,errors.length?'error':'success');toast(message);await refresh();if($('#processing-kind').value==='knowledge')setProcessingTab('knowledge');
   }catch(e){operationStatus('#upload-status',e.message+' 请重新选择文件重试。','error');toast(e.message)}
   finally{uploading=false;button.disabled=false;button.innerHTML=svg('plus')+(mode==='demo'?'体验文件解析':'选择文件');$('#drop-zone').removeAttribute('aria-busy');$('#file-input').value=''}
 }
@@ -127,7 +129,7 @@ function evidenceCard(u){
   return `<details class="evidence-toggle"><summary>${esc(u.locator)} · ${url?'图文证据':'文字证据'}</summary>${url?`<a href="${esc(url)}" target="_blank" rel="noopener" aria-label="查看完整图片"><img loading="lazy" decoding="async" class="evidence-img" src="${esc(url)}" alt="原始文献完整图片"></a>`:''}<div class="evidence-text">${esc(u.text)}</div></details>`;
 }
 function documentEvidenceSection(d){
-  return `<section id="document-evidence" aria-label="原始证据"><div class="detail-section"><h3>原始证据</h3><a class="button secondary" href="/api/originals/${d.id}?mode=${mode}" target="_blank">${svg('download')}原始文件</a></div><div id="document-evidence-list"></div><div class="evidence-pagination" id="document-evidence-pagination"><span id="document-evidence-page-info" role="status" aria-live="polite"></span><div><button type="button" class="button secondary" id="document-evidence-prev">上一页</button><button type="button" class="button secondary" id="document-evidence-next">下一页</button></div></div></section>`;
+  return `${mode==='live'?`<div class="detail-section"><h3>知识条目</h3>${['knowledge_completed','knowledge_failed'].includes(d.status)?`<button class="button secondary" data-start-qa="${esc(d.id)}">生成双语 QA</button>`:''}<button class="button secondary" data-knowledge-doc="${esc(d.id)}">整理知识条目 / 查看任务</button></div>`:''}<section id="document-evidence" aria-label="原始证据"><div class="detail-section"><h3>原始证据</h3><a class="button secondary" href="/api/originals/${d.id}?mode=${mode}" target="_blank">${svg('download')}原始文件</a></div><div id="document-evidence-list"></div><div class="evidence-pagination" id="document-evidence-pagination"><span id="document-evidence-page-info" role="status" aria-live="polite"></span><div><button type="button" class="button secondary" id="document-evidence-prev">上一页</button><button type="button" class="button secondary" id="document-evidence-next">下一页</button></div></div></section>`;
 }
 function renderEvidencePage(units,page=1){
   const pageSize=5,total=units.length,pages=Math.max(1,Math.ceil(total/pageSize));
@@ -144,9 +146,9 @@ async function openDocument(id){const expectedMode=mode,seq=++detailSeq;try{cons
 function timingText(d){const names={source_validation:'来源检查',parsing:'解析',analyzing:'主题识别',generating:'生成',reviewing:'审核',repairing:'修订',repair_reviewing:'修订审核',preflight:'入库校验'};return Object.entries(d.timings||{}).map(([k,v])=>`${names[k]||k} ${Number(v).toFixed(1)} 秒`).join(' · ')}
 function closeDrawer(){++detailSeq;$('#drawer-overlay').hidden=true;document.body.style.overflow='';opened=null}$('#close-drawer').onclick=closeDrawer;$('#drawer-overlay').onclick=e=>{if(e.target===$('#drawer-overlay'))closeDrawer()};document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();$('#connection-popover').hidden=true}});
 $('#connection').onclick=()=>{const el=$('#connection-popover');el.hidden=!el.hidden;el.innerHTML=`<strong>模型连接配置</strong><p>地址：${esc(bootstrap.base_url)}<br>文本模型：${esc(bootstrap.text_model)}<br>视觉模型：${esc(bootstrap.vision_model||'尚未配置，图片任务会明确停止')}<br>密钥：${bootstrap.key_configured?'已配置':'未配置'}</p>${bootstrap.key_configured?'':'<p class="connection-hint">在项目根目录的 <code>.env.local</code> 中填写 <code>API_KEY=你的密钥</code> 后重启服务；密钥只保存在本机，不随代码分发。</p>'}`};
-async function init(){try{bootstrap=await fetch('/api/bootstrap').then(r=>r.json());$('#connection-text').textContent=bootstrap.key_configured?'模型就绪':'模型待配置';updateControls();await refresh();if(['#search','#qas'].includes(location.hash))setView(location.hash.slice(1));setInterval(async()=>{if(document.hidden)return;const working=documents.some(d=>['queued','parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight'].includes(d.status));if(working)await refresh()},2500)}catch(e){toast('本地服务尚未连接，请刷新重试。')}}init();
+async function init(){try{bootstrap=await fetch('/api/bootstrap').then(r=>r.json());$('#connection-text').textContent=bootstrap.key_configured?'模型就绪':'模型待配置';updateControls();await refresh();if(['#search','#knowledge','#qas'].includes(location.hash))setView(location.hash.slice(1));setInterval(async()=>{if(document.hidden)return;const working=documents.some(d=>['queued','parsing','analyzing','generating','reviewing','repairing','repair_reviewing','preflight'].includes(d.status));if(working)await refresh()},2500)}catch(e){toast('本地服务尚未连接，请刷新重试。')}}init();
 
-window.addEventListener('hashchange',()=>{const next=['#search','#qas'].includes(location.hash)?location.hash.slice(1):'files';if(next!==view)setView(next)});
+window.addEventListener('hashchange',()=>{const next=['#search','#knowledge','#qas'].includes(location.hash)?location.hash.slice(1):'files';if(next!==view)setView(next)});
 
 let qaPage=1,qaListSeq=0,qaEditorSeq=0,qaData=null,qaEditing=null,qaSubmitting=false;
 const revisionLabels={queued:'修改待审核',reviewing:'修改审核中',applied:'修改已保存',rejected:'修改未通过',failed:'修改审核异常'};
