@@ -157,7 +157,7 @@ def test_library_images_keep_real_source_locator_bytes_and_preview(tmp_path,monk
     store = app.state.stores['live']
     assert Worker(store).run_once()
     doc = store.document(result['id'])
-    assert doc['status']=='waiting_review' and doc['bilingual_count']==2, doc['error']
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==1, doc['error']
     assert not list((store.root/'originals').iterdir())
     assert all(c['row']['source']==str(source)+'|image-0001|并发观测' for c in doc['candidates'])
     assert all(Path(c['row']['image']).read_bytes()==raw for c in doc['candidates'])

@@ -151,6 +151,9 @@ class Store:
             CREATE INDEX IF NOT EXISTS qa_revision_documents ON qa_revisions(document_id,created DESC,id DESC);
             CREATE INDEX IF NOT EXISTS qas_created ON qas(created DESC,id DESC);
             CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY, applied REAL);
+            CREATE TABLE IF NOT EXISTS qa_corpus_inputs(
+              document_id TEXT PRIMARY KEY REFERENCES documents(id),version_id TEXT NOT NULL,
+              version_hash TEXT NOT NULL,created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS knowledge_jobs(
               document_id TEXT PRIMARY KEY REFERENCES documents(id), task_id TEXT,
               status TEXT NOT NULL, progress TEXT DEFAULT '', error TEXT DEFAULT '',
@@ -213,6 +216,11 @@ class Store:
                 WHERE d.mode='live' GROUP BY d.id HAVING COUNT(*)>5''').fetchall():
                 if not db.execute("SELECT 1 FROM tasks WHERE document_id=? AND status IN ('queued','running')",(row[0],)).fetchone():
                     self._queue_topic_reclassification(db, row[0])
+
+        # Independent product layers share the same database and task leases.
+        from . import corpus, instructions
+        corpus.init_schema(self)
+        instructions.init_schema(self)
 
     @contextlib.contextmanager
     def connect(self):
@@ -314,7 +322,7 @@ class Store:
                        (doc_id, h, name, str(path), 'queued', time.time(), mode))
             task_id = uid()
             db.execute('INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,?,?,?)',
-                       (task_id, doc_id, 'queued', task_stage, 'knowledge' if task_stage=='knowledge' else ''))
+                       (task_id, doc_id, 'queued', task_stage, task_stage if task_stage in {'knowledge','corpus','instruction'} else ''))
             if task_stage == 'knowledge':
                 db.execute('INSERT INTO knowledge_jobs(document_id,task_id,status,updated) VALUES(?,?,?,?)',
                            (doc_id,task_id,'queued',time.time()))
@@ -358,7 +366,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             if not db.execute('SELECT 1 FROM documents WHERE id=?',(doc_id,)).fetchone():
                 raise ValueError('找不到文件')
-            old=db.execute("SELECT id,status FROM tasks WHERE document_id=? AND initial_stage!='knowledge' ORDER BY rowid LIMIT 1",(doc_id,)).fetchone()
+            old=db.execute("SELECT id,status FROM tasks WHERE document_id=? AND COALESCE(NULLIF(initial_stage,''),stage) NOT IN ('knowledge','corpus','instruction') ORDER BY rowid LIMIT 1",(doc_id,)).fetchone()
             if old:return dict(task_id=old['id'],status=old['status'])
             task_id=uid()
             db.execute("INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,'queued','queued','queued')",(task_id,doc_id))
@@ -387,7 +395,7 @@ class Store:
                 VALUES(?,?,?,?,?,?,?,?,?,?)''',(doc_id,content_hash,path.name,str(path),'queued',time.time(),'live','library',str(root),version))
             task_id=uid()
             db.execute('INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,?,?,?)',
-                       (task_id,doc_id,'queued',task_stage,'knowledge' if task_stage=='knowledge' else ''))
+                       (task_id,doc_id,'queued',task_stage,task_stage if task_stage in {'knowledge','corpus','instruction'} else ''))
             if task_stage=='knowledge':
                 db.execute("INSERT INTO knowledge_jobs(document_id,task_id,status,updated) VALUES(?,?,'queued',?)",
                            (doc_id,task_id,time.time()))
@@ -433,9 +441,10 @@ class Store:
             with self.connect() as db:
                 rows = db.execute('''SELECT d.id,d.name,d.status,substr(d.summary,1,500) AS summary,
                     d.error,d.pages,d.unit_count,d.created,d.seconds,d.mode,d.coverage,d.progress,d.layout_note,
-                    (EXISTS(SELECT 1 FROM tasks t WHERE t.document_id=d.id AND t.initial_stage!='knowledge')
+                    (EXISTS(SELECT 1 FROM tasks t WHERE t.document_id=d.id AND COALESCE(NULLIF(t.initial_stage,''),t.stage) NOT IN ('knowledge','corpus','instruction'))
                      OR EXISTS(SELECT 1 FROM candidates c WHERE c.document_id=d.id)
-                     OR NOT EXISTS(SELECT 1 FROM knowledge_jobs j WHERE j.document_id=d.id)) AS has_qa_tasks,
+                     OR (NOT EXISTS(SELECT 1 FROM knowledge_jobs j WHERE j.document_id=d.id)
+                         AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.document_id=d.id AND COALESCE(NULLIF(t.initial_stage,''),t.stage) IN ('corpus','instruction')))) AS has_qa_tasks,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id AND c.status!='discarded') AS candidate_count,
                     (SELECT COUNT(*) FROM candidates c WHERE c.document_id=d.id
                         AND c.status NOT IN ('approved','rejected','discarded')) AS pending_commit_count,

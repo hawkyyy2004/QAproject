@@ -29,7 +29,9 @@ def limits():
 def provider(monkeypatch, enter=None):
     calls = []
     lock = threading.Lock()
-    cfg = dict(settings(), semantic_search={'enabled':False})
+    # These tests exercise concurrency and recovery, not the per-file quota, so
+    # they pin the older five-pair target to keep call counts readable.
+    cfg = dict(settings(), semantic_search={'enabled':False}, target_per_document=5)
     monkeypatch.setattr('qaproject.pipeline.settings', lambda:cfg)
 
     def call(self, instruction, payload, units=(), **kwargs):
@@ -337,7 +339,7 @@ def test_two_images_send_their_own_original_bytes_in_generation_and_review(tmp_p
         originals[raw] = doc
     seen = {doc:[] for doc in originals.values()}
     barrier = threading.Barrier(2)
-    cfg = dict(settings(),semantic_search={'enabled':False})
+    cfg = dict(settings(),semantic_search={'enabled':False},target_per_document=5)
     monkeypatch.setattr('qaproject.pipeline.settings',lambda:cfg)
     def response(request):
         body = json.loads(request.content)
@@ -367,7 +369,7 @@ def test_two_images_send_their_own_original_bytes_in_generation_and_review(tmp_p
     for raw,doc in originals.items():
         result = store.document(doc)
         assert result['status']=='waiting_review', result['error']
-        assert result['bilingual_count']==2 and result['qa_count']==0
+        assert result['bilingual_count']==1 and result['qa_count']==0
         assert seen[doc]==['analysis','generation','review','review']
         assert all(Path(c['row']['image']).read_bytes()==raw for c in result['candidates'])
         assert all('|image-0001|' in c['row']['source'] for c in result['candidates'])

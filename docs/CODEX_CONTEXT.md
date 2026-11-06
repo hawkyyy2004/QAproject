@@ -392,3 +392,19 @@ scripts/check_sqlite_journal.py可作Windows复测或带--baseline-root做隔离
 完整324项及知识专项30项通过（模型替身）；只读真实默认库112事实→106实体，6个双事实实体均验证绑定与原件成功，无正式数据写入或新增模型调用。报告runtime/entity-development/read-only-check.json。未重启服务或浏览器验收，重启后现有条目即可通过汇总视图呈现；README记录边界。
 
 2026-11-05最新界面要求：知识条目汇总移除知识主题筛选，仅保留搜索/实体类型；列表与导出不传主题，原主题数据保留。已更新脚本缓存版本，浏览器全部207条/属性10条切换正常。
+
+## 2026-11-06 Corpus → Instruction 全流程本地版
+
+用户要求按 docs/OceanPile全流程业务开发规划.md 完整做一版并清理冗余，补充要求对应CSV严格按浙大实际文件。现新增corpus.py / instructions.py / corpus_api.py / web_sources.py及web/corpus.js；保留原QA与知识条目所有功能。第四模块为Corpus资料汇总（资料成果/知识条目/知识层级），QA汇总有旧双语QA与新指令加工标签；第一模块支持corpus/corpus_qa、网页、已有文件登记与Corpus任务。
+
+Corpus版本不可变，原件引用服务器位置+hash不复制，图片隔离归档，原始证据不改。处理调用共享文件队列/模型限制/单通道解析。网页公网采集保存HTML快照，防内网/跳转/DNS/超时/过大/软404；未实现动态网页或网页图片自动采集。正文仅保守清洗显式页码行，Markdown为证据重建稿不冒MinerU原产物。旧目录图片仅同ID/位置/hash一致时为新Corpus新建引用，不改旧units或asset记录。已有Corpus可供原QA首次准备复用，已有冻结QA不替换。
+
+新指令四子集，独立候选/审核/修订/提交/恢复、标注（人工确认类别/框/图注与JSON导入）和来源明确的手工知识层级。可选已登记补充Corpus证据。GLM适配器新增内部registered_bundle规则，原QA默认单unit约束保留。冻结标注成员，追加标注不破坏旧绑定；拒绝不能被晚审核覆盖；缓存审核幂等、修订次数独立持久化；跨job问题+图片hash精确重复受控提交拦截。
+
+实际导出：Science input/thinking/output/source；MultiModel-Science input/output/image_path/language；Sonar-Open input/output/image_path/language/source；Bio input/output/image_path/source。四者UTF8无BOM+LF；language映射Chinese/English；图片prefix按原文件Visual Data/image0、Task-specific Data-Sonar/image0、Task-specific Data-RGB/image，内容hash文件名。Web七字段UTF8无BOM+CRLF；paper六字段BOM+CRLF，包内Paper/Pdf与Paper/CleanedData索引/ProcessedData路径一致。新增CSV单独下载与ZIP，旧六字段导出明确保留为历史功能，source使用真实本项目来源标识而不冒浙大值。全文口径、CoT、OCG与内部阈值未公开，不称完整复刻。
+
+全套419通过，后续视觉质量约束59项专项通过（模拟模型）；真实公司GLM：现有HY2论文Corpus、真实NOAA网页Corpus、7审核实体、2Science候选；首次视觉正文截图题人工核对后拒绝，新增图表约束/优先级后轨道图指令成功并受控入库。实际网页Science与图表CSV/ZIP、论文PDF/MD路径、Web全文长度已验。Sonar/Bio未真实专业验收，服务器尚未部署。报告runtime/maintenance/fullflow-validation-20261106.json。旧60QA和324候选hash原样。清理855MiB旧缓存+本轮临时目录累计1319MiB，未动正式数据/模型/备份。当前8765服务运行，8766不用；浏览器初次707布局与表单曾实测，后续CUA连接超时，不能称390视觉验收。
+
+## 2026-11-06 多选处理与资料工具栏
+
+用户批注要求接入网页不独占一行，现与资料成果/知识条目/知识层级标签同排。处理方式替换为QA/知识条目/整理资料三个独立checkbox，默认QA、至少一项；上传/拖拽/服务器资料库共用选项快照与重复processing参数，7组合均可用。API兼容旧both、corpus_qa，新多选QA+corpus仍走原双语QA，不误映射旧corpus_qa新指令链。Corpus先登记，再排QA及知识，保留同文件互斥；删除旧单选DOM观察器，提交完成切对应记录标签。73相关自动测试通过，无真实模型/正式库操作；JS语法/diff检查通过。CUA getState连接超时，已完成失败总结，未目视验收，未重启服务。新接口须重启当前服务后使用。

@@ -129,6 +129,11 @@ LAYOUT_PLACEHOLDER = 'Figure evidence. Read the actual cropped image; its captio
 def extract(store, doc, config, progress=None):
     path = Path(doc['path'])
     folder = store.root / 'assets/images' / doc['id']
+    namespace=config.get('asset_namespace')
+    if namespace:
+        if not isinstance(namespace,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',namespace):
+            raise ValueError('图片资产命名空间无效。')
+        folder=folder/namespace
     folder.mkdir(parents=True, exist_ok=True)
     units = []
     seg_offsets = {}
@@ -271,6 +276,16 @@ def extract(store, doc, config, progress=None):
         asset = store.add_asset(doc['id'], out, 0, '完整原始图片' if expected != 'webp' else '完整图片的 PNG 兼容副本')
         add('Image evidence. Determine language from the actual image.', 0, 1, str(out), asset, 'image-0001',
             evidence_kind='standalone_image', width=profile['width'], height=profile['height'])
+        pages = 0
+    elif suffix in {'.html', '.htm'}:
+        from .web_sources import extract_html
+        article = extract_html(path.read_bytes())
+        if not article['text'].strip():
+            raise ValueError('网页文件没有可读正文。')
+        for s, paragraph in enumerate(re.split(r'\n\s*\n', article['text']), 1):
+            if paragraph.strip():
+                add(paragraph.strip(), 0, s, locator=f'seg-{s:02d}',
+                    evidence_kind='web_text', page_titles=article['title'])
         pages = 0
     elif suffix in {'.txt', '.md'}:
         text = path.read_text(encoding='utf-8-sig')

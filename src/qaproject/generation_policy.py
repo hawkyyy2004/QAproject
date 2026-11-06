@@ -3,20 +3,64 @@ import re
 
 
 def generation_limits(config):
-    target = max(1, min(7, int(config['target_per_document'])))
+    """Ceiling for one document, before its figure count is known."""
+    target = max(1, min(10, int(config['target_per_document'])))
     # Small explicit targets remain useful for isolated validation and deployments.
-    maximum = target if target < 5 else max(target, min(7, int(config.get('max_per_document', 7))))
-    return dict(target=target, maximum=maximum, text=min(5, target), visual=min(2, maximum))
+    if target < 5:
+        return dict(target=target, maximum=target, text=target, visual=target)
+    maximum = max(target, min(10, int(config.get('max_per_document', target))))
+    text = min(5, target)
+    visual = min(5, maximum - text)
+    return dict(target=target, maximum=maximum, text=text, visual=visual)
+
+
+def document_plan(limits, image_count):
+    """One question per figure, and text absorbs everything left over.
+
+    A fixed five-image quota collides with files that hold two or three
+    figures: those pairs cannot exist, and the text side was already capped at
+    five. Counting real figures first turns the remainder into text questions.
+    """
+    if limits['target'] < 5:
+        return dict(limits)
+    visual = min(limits['visual'], max(0, int(image_count)))
+    return dict(limits, text=max(0, limits['target'] - visual), visual=visual)
+
+
+def spread(groups):
+    """Interleave head and tail so the last pages are reached before quota runs out.
+
+    Evidence arrives in document order and a phase used to stop as soon as the
+    quota was met, so the closing chapters never got a single question.
+    """
+    ordered, left, right = [], 0, len(groups) - 1
+    while left <= right:
+        ordered.append(groups[left])
+        left += 1
+        if left <= right:
+            ordered.append(groups[right])
+            right -= 1
+    return ordered
+
+
+def phase_quota(goal, groups):
+    """Largest share one evidence group may take before the next one gets a turn."""
+    return max(1, -(-goal // max(1, len(groups))))
+
+
+def visual_quota(visual_groups, limits):
+    """One question per figure at most."""
+    return min(limits['visual'], sum(len(g) for g in visual_groups)) if visual_groups else 0
 
 
 def generation_phases(text_groups, visual_groups, limits):
     if text_groups:
-        yield 'text', min(3, limits['text']) if visual_groups else limits['text'], False, text_groups
+        yield 'text', min(3, limits['text']) if visual_groups else limits['text'], False, spread(text_groups)
     if visual_groups:
-        yield 'visual', limits['visual'], False, visual_groups
+        yield 'visual', visual_quota(visual_groups, limits), False, spread(visual_groups)
     if text_groups and visual_groups:
         # A missing/unusable figure is replaced with text, never a fabricated visual QA.
-        yield 'text', limits['text'], True, text_groups
+        yield 'text', limits['target'], True, spread(text_groups)
 
 
 def modality_counts(candidates):

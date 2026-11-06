@@ -62,7 +62,7 @@ function setView(next){
   view=['files','search','knowledge','qas'].includes(next)?next:'files';
   for(const key of ['files','search','knowledge','qas'])$('#'+key+'-view').hidden=view!==key;
   document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
-  const names={files:'文件处理',search:'主题模糊搜索',qas:'QA汇总',knowledge:'知识条目汇总'};
+  const names={files:'文件处理',search:'主题模糊搜索',qas:'QA汇总',knowledge:'资料汇总'};
   $('#crumb').textContent=names[view];
   if(view==='search')runSearch();
   if(view==='qas')loadQAs();
@@ -75,24 +75,40 @@ document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=async()=>{mode=b.d
 $('#file-filter').oninput=()=>{if(processingTab==='knowledge'){knowledgeJobsPage=1;loadKnowledgeJobs()}else renderDocuments()};
 $('#choose-files').onclick=()=>$('#file-input').click();
 $('#file-input').onchange=e=>upload(e.target.files);
+function processingKinds(){return [...document.querySelectorAll('#processing-kind input:checked')].map(box=>box.value)}
+function processingQuery(selected){const params=new URLSearchParams();selected.forEach(kind=>params.append('processing',kind));return params.toString()}
+function showProcessingRecords(selected){setProcessingTab(selected.includes('qa')?'qa':selected.includes('knowledge')?'knowledge':'corpus')}
+$('#processing-kind').addEventListener('change',e=>{
+  if(!processingKinds().length){e.target.checked=true;toast('请至少选择一种处理方式。')}
+});
 async function upload(files){
   if(!files.length)return;
   if(uploading){toast('正在上传，请等待本批文件提交完成。');return}
+  const processing=processingKinds();
+  if(!processing.length){toast('请至少选择一种处理方式。');return}
   const selected=Array.from(files),form=new FormData();selected.forEach(f=>form.append('files',f));
   uploading=true;const button=$('#choose-files');button.disabled=true;button.textContent='上传中…';$('#drop-zone').setAttribute('aria-busy','true');
   operationStatus('#upload-status',`正在上传 ${selected.length} 份文件，请稍候…`);
   try{
-    const result=await api('/api/imports?processing='+encodeURIComponent($('#processing-kind').value),{method:'POST',body:form});
+    const result=await api('/api/imports?'+processingQuery(processing),{method:'POST',body:form});
     const errors=result.filter(r=>r.error),created=result.filter(r=>r.created).length,reused=result.filter(r=>r.created===false&&!r.error).length;
     const message=`${created} 份已加入处理队列${reused?`，${reused} 份重复内容已复用`:''}。`+(errors.length?'未导入：'+errors.map(e=>e.name+'：'+e.error).join('；'):'处理完成后会自动更新列表。');
-    operationStatus('#upload-status',message,errors.length?'error':'success');toast(message);await refresh();if($('#processing-kind').value==='knowledge')setProcessingTab('knowledge');
+    operationStatus('#upload-status',message,errors.length?'error':'success');toast(message);await refresh();showProcessingRecords(processing);
   }catch(e){operationStatus('#upload-status',e.message+' 请重新选择文件重试。','error');toast(e.message)}
   finally{uploading=false;button.disabled=false;button.innerHTML=svg('plus')+(mode==='demo'?'体验文件解析':'选择文件');$('#drop-zone').removeAttribute('aria-busy');$('#file-input').value=''}
 }
 const drop=$('#drop-zone');['dragenter','dragover'].forEach(type=>drop.addEventListener(type,e=>{e.preventDefault();drop.classList.add('dragover')}));['dragleave','drop'].forEach(type=>drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('dragover')}));drop.addEventListener('drop',e=>upload(e.dataTransfer.files));
 function download(query=''){window.open('/api/export?mode='+mode+query,'_blank')}
 $('#export-all').onclick=()=>download();
-async function runSearch(){const q=$('#theme-query').value.trim(),expectedMode=mode,seq=++searchSeq;clearTimeout(searchTimer);clearTimeout(semanticTimer);$('#search-button').disabled=true;$('#search-button').textContent='搜索中…';$('#search-results').setAttribute('aria-busy','true');$('#search-results').innerHTML='';operationStatus('#search-status','正在搜索主题…');$('#semantic-section').hidden=!q;$('#semantic-results').innerHTML='';$('#semantic-status').textContent=q?'正在查找相关主题…':'';if(q)loadRecommendations(q,expectedMode,seq);try{const result=await api('/api/search?q='+encodeURIComponent(q));if(expectedMode!==mode||seq!==searchSeq)return;operationStatus('#search-status',result.length?`找到 ${result.length} 个${q?'直接匹配':''}主题。`:'没有直接匹配的主题，可更换关键词重试。');$('#search-summary').textContent=q?`“${q}” · ${result.length} 个直接匹配主题`:'主题与涵盖文件';$('#search-results').innerHTML=result.length?result.map(r=>`<article class="topic-result"><div class="topic-result-head"><div><div class="topic-result-name">${svg('topic')}${esc(r.topic.name)}<small>${esc(r.reason)}</small></div><p class="topic-definition">${esc(r.topic.definition)}</p><div class="keywords">${r.terms.map(term=>`<button class="keyword" data-query="${esc(term)}">${esc(term)}</button>`).join('')}</div></div><div class="topic-result-count">${r.documents.length} 份涵盖文件 <button class="button ghost" data-export-topic="${r.topic.id}">${svg('download')}</button></div></div><div class="result-files">${r.documents.map(d=>`<div class="result-file" data-document="${d.id}" tabindex="0"><div class="file-cell"><div class="file-icon">${svg('files')}<span>${esc(d.name.split('.').pop().toUpperCase())}</span></div><div><div class="file-name">${esc(d.name)}</div><div class="file-summary">${esc(d.summary)}</div></div></div><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span><span class="arrow-button">↗</span></div>`).join('')||'<div class="empty-state">此主题暂未关联资料</div>'}</div></article>`).join(''):'<div class="table-card empty-state"><strong>没有直接匹配的主题</strong>下方可查看相似主题推荐，或更换关键词。</div>';bindDocs($('#search-results'));bindQueries($('#search-results'));$('#search-results').querySelectorAll('[data-export-topic]').forEach(b=>b.onclick=()=>download('&topic_id='+b.dataset.exportTopic))}catch(e){if(expectedMode===mode&&seq===searchSeq){operationStatus('#search-status',e.message+' 点击搜索可重试。','error');toast(e.message)}}finally{if(expectedMode===mode&&seq===searchSeq){$('#search-button').disabled=false;$('#search-button').textContent='搜索';$('#search-results').removeAttribute('aria-busy')}}}
+function clearThemeResults(){
+  $('#search-summary').parentElement.hidden=true;
+  $('#search-results').hidden=true;$('#search-results').innerHTML='';
+  $('#search-results').removeAttribute('aria-busy');
+  $('#semantic-section').hidden=true;$('#semantic-results').innerHTML='';
+  $('#semantic-status').textContent='';operationStatus('#search-status','');
+  $('#search-button').disabled=false;$('#search-button').textContent='搜索';
+}
+async function runSearch(){const q=$('#theme-query').value.trim(),expectedMode=mode,seq=++searchSeq;clearTimeout(searchTimer);clearTimeout(semanticTimer);if(!q){clearThemeResults();return}$('#search-summary').parentElement.hidden=false;$('#search-results').hidden=false;$('#search-summary').textContent=`正在搜索“${q}”…`;$('#search-button').disabled=true;$('#search-button').textContent='搜索中…';$('#search-results').setAttribute('aria-busy','true');$('#search-results').innerHTML='';operationStatus('#search-status','正在搜索主题…');$('#semantic-section').hidden=!q;$('#semantic-results').innerHTML='';$('#semantic-status').textContent=q?'正在查找相关主题…':'';if(q)loadRecommendations(q,expectedMode,seq);try{const result=await api('/api/search?q='+encodeURIComponent(q));if(expectedMode!==mode||seq!==searchSeq)return;operationStatus('#search-status',result.length?`找到 ${result.length} 个${q?'直接匹配':''}主题。`:'没有直接匹配的主题，可更换关键词重试。');$('#search-summary').textContent=q?`“${q}” · ${result.length} 个直接匹配主题`:'主题与涵盖文件';$('#search-results').innerHTML=result.length?result.map(r=>`<article class="topic-result"><div class="topic-result-head"><div><div class="topic-result-name">${svg('topic')}${esc(r.topic.name)}<small>${esc(r.reason)}</small></div><p class="topic-definition">${esc(r.topic.definition)}</p><div class="keywords">${r.terms.map(term=>`<button class="keyword" data-query="${esc(term)}">${esc(term)}</button>`).join('')}</div></div><div class="topic-result-count">${r.documents.length} 份涵盖文件 <button class="button ghost" data-export-topic="${r.topic.id}">${svg('download')}</button></div></div><div class="result-files">${r.documents.map(d=>`<div class="result-file" data-document="${d.id}" tabindex="0"><div class="file-cell"><div class="file-icon">${svg('files')}<span>${esc(d.name.split('.').pop().toUpperCase())}</span></div><div><div class="file-name">${esc(d.name)}</div><div class="file-summary">${esc(d.summary)}</div></div></div><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span><span class="arrow-button">↗</span></div>`).join('')||'<div class="empty-state">此主题暂未关联资料</div>'}</div></article>`).join(''):'<div class="table-card empty-state"><strong>没有直接匹配的主题</strong>下方可查看相似主题推荐，或更换关键词。</div>';bindDocs($('#search-results'));bindQueries($('#search-results'));$('#search-results').querySelectorAll('[data-export-topic]').forEach(b=>b.onclick=()=>download('&topic_id='+b.dataset.exportTopic))}catch(e){if(expectedMode===mode&&seq===searchSeq){operationStatus('#search-status',e.message+' 点击搜索可重试。','error');toast(e.message)}}finally{if(expectedMode===mode&&seq===searchSeq){$('#search-button').disabled=false;$('#search-button').textContent='搜索';$('#search-results').removeAttribute('aria-busy')}}}
 
 async function loadRecommendations(q,expectedMode,seq){
   if(expectedMode!==mode||seq!==searchSeq||view!=='search')return;
@@ -108,7 +124,7 @@ async function loadRecommendations(q,expectedMode,seq){
 }
 
 function bindQueries(root){root.querySelectorAll('[data-query]').forEach(b=>b.onclick=()=>{$('#theme-query').value=b.dataset.query;runSearch()})}bindQueries(document);
-$('#search-button').onclick=runSearch;$('#theme-query').onkeydown=e=>{if(e.key==='Enter')runSearch()};$('#theme-query').oninput=()=>{++searchSeq;clearTimeout(semanticTimer);clearTimeout(searchTimer);searchTimer=setTimeout(runSearch,350)};
+$('#search-button').onclick=runSearch;$('#theme-query').onkeydown=e=>{if(e.key==='Enter')runSearch()};$('#theme-query').oninput=()=>{++searchSeq;clearTimeout(semanticTimer);clearTimeout(searchTimer);if(!$('#theme-query').value.trim()){clearThemeResults();return}searchTimer=setTimeout(runSearch,350)};
 function candidateCard(c,i,d){
   const blocked=c.status==='needs_review';
   const modelPassed=['supported','independent','scope_correct','knowledge_value','distinct','topic_correct','language_correct','translation_consistent'].every(k=>c.review[k]===true);
@@ -159,7 +175,7 @@ async function loadQAs(){
     if(seq!==qaListSeq||expectedMode!==mode)return;
     qaData=data;qaPage=data.page;
     $('#qa-total').textContent=data.total;
-    $('#qas-view .table-scroll').hidden=!data.items.length;$('#qa-empty').hidden=Boolean(data.items.length);
+    $('#qa-rows').closest('.table-scroll').hidden=!data.items.length;$('#qa-empty').hidden=Boolean(data.items.length);
     $('#qa-page-info').textContent=`共 ${data.total} 条 · 第 ${data.page} / ${data.pages} 页`;
     $('#qa-prev').disabled=data.page<=1;$('#qa-next').disabled=data.page>=data.pages;
     $('#qa-rows').innerHTML=data.items.length?data.items.map(item=>`<tr>${['input','thinking','output','source','image','language'].map(k=>`<td><div class="qa-cell-text ${['source','image'].includes(k)?'qa-path':''}">${esc(item.row[k]||(k==='image'?'无图片':''))}</div></td>`).join('')}<td><button class="button ghost qa-edit-button" data-edit-qa="${esc(item.id)}">查看 / 编辑</button>${item.revision?`<span class="qa-row-status">${esc(revisionLabels[item.revision.status]||'')}</span>`:''}</td></tr>`).join(''):'<tr><td colspan="7"><div class="empty-state"><strong>还没有已入库的问答</strong>在文件处理中完成审核并入库后，问答会显示在这里。</div></td></tr>';

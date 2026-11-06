@@ -14,7 +14,7 @@ from .sqlite_support import initialize_journal
 
 # Keep this in step with the upload whitelist in app.py, or data files are
 # visible on disk but missing from "从资料库选择".
-FORMATS = {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4'}
+FORMATS = {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4','.html','.htm'}
 
 
 class LibraryIndex:

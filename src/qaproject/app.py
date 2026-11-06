@@ -23,6 +23,24 @@ from .execution import ExecutionLimits, execution_config
 from .conflicts import EditConflict
 from .library import LibraryIndex
 from .persistence import RuntimeLease
+
+ProcessingKind = Literal['qa','knowledge','both','corpus','corpus_qa']
+
+
+def processing_plan(values):
+    """Independent selections; retain the previous single-value API aliases."""
+    selected=set(values)
+    if 'both' in selected:
+        selected.remove('both')
+        selected.update(('qa','knowledge'))
+    if 'corpus_qa' in selected:
+        selected.remove('corpus_qa')
+        selected.update(('corpus','instruction'))
+    return selected
+
+
+def processing_stage(selected):
+    return 'corpus' if 'corpus' in selected else 'queued' if 'qa' in selected else 'knowledge'
 from . import knowledge
 
 
@@ -82,6 +100,8 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         try:
             if workers:
                 for store in stores.values(): store.recover_abandoned()
+                from .corpus_api import reconcile_chains
+                for store in stores.values(): reconcile_chains(store)
             for worker in runners: worker.start()
             if workers:
                 search_runner.start()
@@ -127,6 +147,9 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         if mode not in stores: raise HTTPException(400,'工作区无效')
         return stores[mode]
 
+    from .corpus_api import register_routes
+    register_routes(app, workspace)
+
     @app.exception_handler(ValueError)
     async def validation_error(request,error):
         return JSONResponse({'detail':str(error)},status_code=400)
@@ -134,6 +157,12 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
     @app.exception_handler(EditConflict)
     async def edit_conflict(request,error):
         return JSONResponse({'detail':str(error),'code':'edit_conflict'},status_code=409)
+
+    from .instructions import InstructionError
+    @app.exception_handler(InstructionError)
+    async def instruction_error(request,error):
+        status=409 if error.code in {'conflict','binding_changed'} else 404 if error.code=='not_found' else 400
+        return JSONResponse({'detail':str(error),'code':error.code},status_code=status)
 
     @app.get('/api/bootstrap')
     def bootstrap():
@@ -154,7 +183,8 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         return library.request_refresh()
 
     @app.post('/api/library/imports')
-    def library_import(body:LibraryImport,processing:Literal['qa','knowledge','both']='qa'):
+    def library_import(body:LibraryImport,processing:list[ProcessingKind]=Query(default=['qa'])):
+        selected=processing_plan(processing)
         results=[]
         for entry in body.files:
             started=time.perf_counter()
@@ -162,8 +192,8 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
                 limits=settings()
                 result=library.import_entry(entry.id,entry.version,limits['max_file_mb']*1024*1024,
                     int(limits.get('max_netcdf_mb',2048))*1024*1024,
-                    task_stage='knowledge' if processing=='knowledge' else 'queued')
-                schedule_processing(stores['live'],result['id'],result['created'],processing)
+                    task_stage=processing_stage(selected))
+                schedule_processing(stores['live'],result['id'],result['created'],selected)
                 results.append(result)
             except (ValueError,OSError) as error:
                 stores['live'].event(None,'library_import_failed',{'entry_id':entry.id,'stage':'registration',
@@ -201,7 +231,8 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         return searches[mode].recommend(q)
 
     @app.post('/api/imports')
-    async def imports(request:Request,mode='live', processing:Literal['qa','knowledge','both']='qa'):
+    async def imports(request:Request,mode='live', processing:list[ProcessingKind]=Query(default=['qa'])):
+        selected=processing_plan(processing)
         store=workspace(mode)
         # Multipart data is streamed by Starlette into a temporary spool, then bounded per file.
         form=await request.form(max_files=50,max_fields=5)
@@ -211,7 +242,7 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         results=[]
         for file in files:
             suffix = Path(file.filename).suffix.lower()
-            if suffix not in {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4'}:
+            if suffix not in {'.pdf','.png','.jpg','.jpeg','.webp','.txt','.md','.csv','.tsv','.nc','.nc4','.html','.htm'}:
                 results.append({'name':file.filename,'error':'该格式尚未支持'});continue
             # Gridded climate files are legitimately hundreds of MB; the reader
             # samples slices, so the old 25 MB ceiling was the only obstacle.
@@ -221,16 +252,19 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
             if not data or len(data)>limit:
                 results.append({'name':file.filename,'error':'文件为空或超出大小限制'});continue
             doc_id,created=store.import_file(file.filename,data,mode,
-                                           task_stage='knowledge' if processing=='knowledge' else 'queued')
-            schedule_processing(store,doc_id,created,processing)
+                                           task_stage=processing_stage(selected))
+            schedule_processing(store,doc_id,created,selected)
             results.append({'id':doc_id,'name':file.filename,'created':created})
         return results
 
-    def schedule_processing(store,doc_id,created,processing):
-        if processing=='both' or (processing=='knowledge' and not created):
-            knowledge.enqueue(store,doc_id)
-        if processing in {'qa','both'} and not created:
+    def schedule_processing(store,doc_id,created,selected):
+        if 'corpus' in selected:
+            from . import corpus
+            corpus.enqueue(store,doc_id,generate_after='instruction' in selected)
+        if 'qa' in selected and (not created or processing_stage(selected)!='queued'):
             store.ensure_qa_task(doc_id)
+        if 'knowledge' in selected and (not created or processing_stage(selected)!='knowledge'):
+            knowledge.enqueue(store,doc_id)
 
     @app.get('/api/assets/{asset_id}')
     def asset(asset_id,mode='live'):
@@ -239,8 +273,11 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
             row=db.execute('SELECT path,hash FROM assets WHERE id=?',(asset_id,)).fetchone()
         if not row: raise HTTPException(404,'图片不存在')
         path=Path(row['path']).resolve()
-        if not path.is_relative_to(store.root/'assets/images') or not path.is_file():
+        if not any(path.is_relative_to(root) for root in (store.root/'assets/images',store.root/'corpus/versions')) or not path.is_file():
             raise HTTPException(404,'图片存储无效')
+        from .persistence import file_hash
+        if file_hash(path)!=row['hash']:
+            raise HTTPException(409,'图片内容已变化，未提供失效证据。')
         return FileResponse(path,media_type=image_media_type(path))
 
     @app.get('/api/originals/{doc_id}')
@@ -300,7 +337,7 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         if doc['status']!='failed': raise HTTPException(400,'仅失败任务可重试')
         store.event(doc_id, 'retry_requested', {'previous_error':doc['error'], 'previous_seconds':doc['seconds'], 'timings':doc['timings']})
         with store.connect() as db:
-            db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0 WHERE document_id=? AND status='failed' AND initial_stage!='knowledge'",(doc_id,))
+            db.execute("UPDATE tasks SET status='queued',worker=NULL,lease_until=0 WHERE document_id=? AND status='failed' AND initial_stage NOT IN ('knowledge','corpus','instruction')",(doc_id,))
         store.update_document(doc_id,status='queued',error='')
         return {'queued':True}
 

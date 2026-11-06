@@ -145,6 +145,10 @@ def sources(unit, doc):
 
 def prepare(store, doc, config, heartbeat):
     path = original_path(doc,store.root)
+    from .corpus import prepared_units
+    prepared=prepared_units(store,doc['id'])
+    if prepared:
+        return prepared
     if path.suffix.lower() in {'.csv','.tsv'}:
         with path.open(encoding='utf-8-sig',newline='') as f:
             reader = csv.DictReader(f,delimiter='\t' if path.suffix.lower()=='.tsv' else ',')
@@ -531,4 +535,4 @@ def export_csv(store,**filters):
         entry=detail(store,entry_id,json.loads(members))
         if not entry['source_valid']:raise ValueError('存在原件变更或失效的条目，未导出。')
         writer.writerow(entry['row'])
-    return content.getvalue().encode('utf-8-sig')
+    return content.getvalue().encode('utf-8')

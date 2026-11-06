@@ -163,7 +163,9 @@ def test_api_default_qa_preserved_and_knowledge_is_separate(tmp_path,provider):
     assert client.get('/api/knowledge?entity_type=Process&q=温盐').json()['total']==1
     assert client.get('/api/knowledge?topic=其他').json()['total']==0
     assert client.get('/api/knowledge/jobs').json()[0]['status']=='completed'
-    assert client.get('/api/knowledge/export').content.startswith(b'\xef\xbb\xbf')
+    exported=client.get('/api/knowledge/export').content
+    assert not exported.startswith(b'\xef\xbb\xbf')  # OceanCorpus Web reference is UTF-8 without BOM.
+    assert exported.startswith(b'entity_name,entity_type,entity_description,page_urls,page_titles,full_text,full_text_length\r\n')
     assert client.get('/api/knowledge?page=0').status_code==422
     assert client.get('/api/knowledge?entity_type=invalid').status_code==400
     assert client.get('/knowledge.js').status_code==200
