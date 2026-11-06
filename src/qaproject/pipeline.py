@@ -16,7 +16,8 @@ from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog, load_json
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection, visual_topic_support
-from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority, visual_quota
+from .generation_policy import (document_plan, generation_limits, generation_phases, modality_counts,
+                                visual_priority, visual_quota)
 from .execution import DEFAULT_LIMITS, WorkInterrupted
 from .source_files import verify_reference
 from .sqlite_support import sqlite_diagnostics
@@ -72,7 +73,7 @@ def finish_review(db, document_id):
         minimum=config['min_per_document']
         limits=generation_limits(config)
         actual=counts['qa_pair_count'] if counts['pair_count'] else count
-        goal=f'每篇目标 {limits["target"]} 组（文字 {limits["text"]} + 图片 {limits["visual"]}）'
+        goal=f'每篇目标 {limits["target"]} 组（图片按文件实际图数分配、每图 1 组，其余为文字）'
         insufficient = (f'实际入库 {count} 条，完整双语 {counts["qa_pair_count"]} 组，低于下限 {minimum} 组；{goal}，质量优先，不补造。'
                         if counts['pair_count'] else f'历史单语实际入库 {count} 条，低于下限 {minimum} 条；质量优先，不补造。')
         db.execute('UPDATE documents SET status=?,error=? WHERE id=?',
@@ -1113,10 +1114,10 @@ class Worker:
             text_units = [u for u in units if not u['image']]
             visual_units = [u for u in units if u['image']]
             groups = list(batches(text_units))+list(batches(u for u in visual_units if u['id'] not in covered))
-            limits = generation_limits(config)
             text_groups = list(batches(text_units))
             visual_groups = list(batches(sorted(visual_units, key=visual_priority),
                                          max_images=max(1,min(2,int(config.get('generation_max_images',1))))))
+            limits = document_plan(generation_limits(config), sum(len(g) for g in visual_groups))
             # A file without usable figures can only reach the text quota; do not
             # keep requesting more batches for pairs that cannot exist.
             attainable = min(limits['target'], limits['text'] + visual_quota(visual_groups, limits))
@@ -1272,6 +1273,7 @@ class Worker:
                     # Every evidence group takes one turn before any group takes a
                     # second share, so quota is not spent on the opening pages.
                     pending = list(groups)
+                    revisits = {}
                     while pending:
                         group = pending.pop(0)
                         group_ids = {u['id'] for u in group}
@@ -1374,6 +1376,14 @@ class Worker:
                             taken += len(generated)
                             review_candidates(generated,group,previous_questions)
                             stage('generating', f'已准备 {count} 组双语问答：文字 {counts["text"]} 组、图片 {counts["visual"]} 组')
+                        # Ten pairs may outnumber the available evidence groups; a
+                        # group that already delivered gets a second turn rather
+                        # than leaving the document short of its quota.
+                        if mode=='text' and taken and counts[mode]<goal:
+                            key = frozenset(original_group_ids)
+                            revisits[key] = revisits.get(key, 0) + 1
+                            if revisits[key] <= 2:
+                                pending.append(group)
             # Keep normal generation first; only failed groups enter the repair path.
             # At most one replacement pass follows; evidence limits still take priority.
             for delivery_pass in range(2):
@@ -1400,7 +1410,8 @@ class Worker:
             store.update_document(doc['id'], status='waiting_review' if has_candidates else 'insufficient',
                                   error='' if count>=config['min_per_document'] else
                                   (f'仅有 {count} 组双语问答通过审核与入库校验；完整目标 {limits["target"]} 组'
-                                   f'（文字 {limits["text"]} + 图片 {limits["visual"]}，单图最多2组），'
+                                   f'（图片按本文件实际图数分配 {limits["visual"]} 组、每图 1 组，'
+                                   f'其余 {limits["text"]} 组为文字），'
                                    f'低于 {config["min_per_document"]} 组按证据不足标注；不合格草稿已保留，不补造。'),
                                   seconds=seconds, progress=f'{count} 组双语问答已通过审核与入库校验' if has_candidates else '')
             store.event(doc['id'], 'run_complete', {'run_id':run_id,'seconds':seconds,'timings':timings,'pairs':count,'candidates':len(existing)})

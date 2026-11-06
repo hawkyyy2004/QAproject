@@ -3,7 +3,7 @@ import re
 
 
 def generation_limits(config):
-    """Text and image quotas are separate so neither starves the other."""
+    """Ceiling for one document, before its figure count is known."""
     target = max(1, min(10, int(config['target_per_document'])))
     # Small explicit targets remain useful for isolated validation and deployments.
     if target < 5:
@@ -12,6 +12,19 @@ def generation_limits(config):
     text = min(5, target)
     visual = min(5, maximum - text)
     return dict(target=target, maximum=maximum, text=text, visual=visual)
+
+
+def document_plan(limits, image_count):
+    """One question per figure, and text absorbs everything left over.
+
+    A fixed five-image quota collides with files that hold two or three
+    figures: those pairs cannot exist, and the text side was already capped at
+    five. Counting real figures first turns the remainder into text questions.
+    """
+    if limits['target'] < 5:
+        return dict(limits)
+    visual = min(limits['visual'], max(0, int(image_count)))
+    return dict(limits, text=max(0, limits['target'] - visual), visual=visual)
 
 
 def spread(groups):
@@ -36,8 +49,8 @@ def phase_quota(goal, groups):
 
 
 def visual_quota(visual_groups, limits):
-    """Two questions per figure at most; a single figure cannot fill a five-image target."""
-    return min(limits['visual'], 2*len(visual_groups)) if visual_groups else 0
+    """One question per figure at most."""
+    return min(limits['visual'], sum(len(g) for g in visual_groups)) if visual_groups else 0
 
 
 def generation_phases(text_groups, visual_groups, limits):
@@ -47,7 +60,7 @@ def generation_phases(text_groups, visual_groups, limits):
         yield 'visual', visual_quota(visual_groups, limits), False, spread(visual_groups)
     if text_groups and visual_groups:
         # A missing/unusable figure is replaced with text, never a fabricated visual QA.
-        yield 'text', limits['text'], True, spread(text_groups)
+        yield 'text', limits['target'], True, spread(text_groups)
 
 
 def modality_counts(candidates):

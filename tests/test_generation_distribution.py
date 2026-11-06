@@ -6,7 +6,7 @@ import httpx
 import pymupdf
 import pytest
 
-from qaproject.generation_policy import generation_limits, modality_counts, spread
+from qaproject.generation_policy import document_plan, generation_limits, modality_counts, spread
 from qaproject.parsers import text_alternatives
 from qaproject.pipeline import (Worker, CHECKS, BILINGUAL_CHECKS, approve, sanitize_review,
                                 strip_unit_ids)
@@ -16,7 +16,9 @@ from test_bilingual import pair
 
 
 @pytest.fixture
-def mixed(tmp_path, monkeypatch):
+def mixed(tmp_path, monkeypatch, request):
+    # Indirect parameter: how many of the 22 pages carry a figure (default 13).
+    figures = getattr(request, 'param', 13)
     store = Store(tmp_path/'mixed')
     doc_id, _ = store.import_file('mixed.txt', b'isolated evidence fixture', 'live')
     with pymupdf.open() as pdf:
@@ -26,7 +28,7 @@ def mixed(tmp_path, monkeypatch):
     units = []
     for n in range(22):
         image, asset = '', ''
-        if n < 13:
+        if n < figures:
             path = store.root/'assets/images'/f'page-{n+1}.png'
             path.write_bytes(raw)
             image = str(path)
@@ -37,7 +39,7 @@ def mixed(tmp_path, monkeypatch):
                  page=n+1,seg=1,locator=f'page-{n+1:04d}-seg-0001',language='en')
         units.append(dict(u,hash=digest(u)))
     units = text_alternatives(units)
-    assert len(units)==35
+    assert len(units)==22+figures
     store.update_document(doc_id,units=units,pages=22)
     calls, behavior = [], {}
     monkeypatch.setattr('qaproject.glm.api_key',lambda:'isolated-test-placeholder')
@@ -114,15 +116,35 @@ def test_35_units_produce_five_text_and_five_visual_pairs(mixed):
     assert store.document(doc_id)['qa_pair_count']==10
 
 
-def test_unusable_images_are_bounded_and_text_fills_five(mixed):
+def test_unusable_images_are_bounded_and_text_takes_the_whole_target(mixed):
     store, doc_id, _, calls, behavior = mixed
     behavior['no_figures']=True
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=5,visual=0)
+    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
     generations = [p for k,p,_ in calls if k=='generation']
-    assert [p['evidence_mode'] for p in generations]==['text','visual','visual','visual','visual','visual','text']
-    assert [p['target'] for p in generations]==[3,1,1,1,1,1,2]
+    modes = [p['evidence_mode'] for p in generations]
+    assert modes.count('visual')==5 and modes.count('text')>=3
+    assert doc['bilingual_count']==10
     assert not doc['error']
+
+
+@pytest.mark.parametrize('mixed',[3],indirect=True)
+def test_three_figures_take_three_visual_pairs_and_text_keeps_the_rest(mixed):
+    store, doc_id, _, calls, _ = mixed
+    doc = process(store,doc_id)
+    assert modality_counts(doc['candidates'])==dict(text=7,visual=3)
+    assert doc['bilingual_count']==10
+    visual = [p for k,p,_ in calls if k=='generation' and p['evidence_mode']=='visual']
+    assert len(visual)==3
+
+
+@pytest.mark.parametrize('mixed',[0],indirect=True)
+def test_document_without_figures_produces_ten_text_pairs(mixed):
+    store, doc_id, _, calls, _ = mixed
+    doc = process(store,doc_id)
+    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
+    assert doc['bilingual_count']==10
+    assert all(p['evidence_mode']=='text' for k,p,_ in calls if k=='generation')
 
 
 def test_existing_five_text_pairs_still_leave_room_for_five_visual(mixed,monkeypatch):
@@ -164,6 +186,19 @@ def test_default_limits_and_explicit_small_validation_target():
     assert generation_limits(dict(settings(),target_per_document=1))==dict(target=1,maximum=1,text=1,visual=1)
 
 
+def test_document_plan_moves_unused_figure_quota_to_text():
+    limits = generation_limits(settings())
+    assert document_plan(limits, 0)==dict(target=10,maximum=10,text=10,visual=0)
+    assert document_plan(limits, 3)==dict(target=10,maximum=10,text=7,visual=3)
+    assert document_plan(limits, 5)==dict(target=10,maximum=10,text=5,visual=5)
+    # More figures than the visual quota cannot push the total past ten.
+    assert document_plan(limits, 40)==dict(target=10,maximum=10,text=5,visual=5)
+    # Small validation targets keep their explicit split.
+    small = generation_limits(dict(settings(),target_per_document=1))
+    assert document_plan(small, 4)==dict(target=1,maximum=1,text=1,visual=1)
+
+
+
 def test_spread_alternates_head_and_tail():
     assert spread([1,2,3,4,5])==[1,5,2,4,3]
     assert spread([1,2])==[1,2]
@@ -196,11 +231,11 @@ def test_request_local_unit_ids_never_reach_the_reader():
     assert strip_unit_ids('CO2 分压随纬度升高而下降。')=='CO2 分压随纬度升高而下降。'
 
 
-def test_visual_format_failure_is_bounded_and_text_still_delivers_five(mixed):
+def test_visual_format_failure_is_bounded_and_text_takes_the_quota(mixed):
     store, doc_id, _, calls, behavior = mixed
     behavior['invalid_visual']=True
     doc=process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=5,visual=0)
+    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
     assert len([p for k,p,_ in calls if k=='generation' and p['evidence_mode']=='visual'])==2
     with store.connect() as db:
         assert db.execute("SELECT count(*) FROM events WHERE kind='model_error'").fetchone()[0]==2

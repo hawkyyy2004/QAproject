@@ -8,12 +8,16 @@ import pytest
 
 from qaproject.glm import GLMClient
 from qaproject.pipeline import Worker, CHECKS, BILINGUAL_CHECKS, approve
+from qaproject.settings import settings
 from qaproject.store import Store, encode
 from test_document_topics import evidence, proposal, facts
 from test_bilingual import pair, setup_pipeline, run
 
 
 def test_multibatch_whole_file_topics_share_first_generation_and_keep_call_count(tmp_path,monkeypatch):
+    # Call-count contract, not the per-file quota: pin the older five-pair target.
+    monkeypatch.setattr('qaproject.pipeline.settings',
+                        lambda: dict(settings(), target_per_document=5))
     store=Store(tmp_path/'live')
     doc_id,_=store.import_file('whole.txt',b'isolated evidence','live')
     units=[evidence(n,'Synthetic calibrated observation. '*220) for n in range(1,6)]

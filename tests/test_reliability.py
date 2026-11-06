@@ -107,6 +107,9 @@ def test_expired_task_reopens_with_matching_visible_status(tmp_path):
 
 
 def test_failed_review_resumes_at_five_without_repeating_generation(tmp_path, monkeypatch):
+    # Resume contract, not the per-file quota: pin the older five-pair target.
+    monkeypatch.setattr('qaproject.pipeline.settings',
+                        lambda: dict(settings(), target_per_document=5))
     app = create_app(tmp_path/'app', workers=False)
     store = app.state.stores['live']
     doc_id, _ = store.import_file('sample.txt', '演示海域 A 的 2025 年 1 月温度为 15 摄氏度。'.encode(), 'live')

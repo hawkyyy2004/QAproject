@@ -137,19 +137,30 @@ def test_persistent_invalid_single_unit_stops_after_one_retry_without_cache(tmp_
 
 
 def test_facts_recovery_continues_through_bilingual_review_and_controlled_commit(tmp_path, monkeypatch):
+    # Pipeline recovery contract, not the per-file quota: pin the older target.
+    monkeypatch.setattr('qaproject.pipeline.settings',
+                        lambda: dict(settings(), target_per_document=5))
     store, doc_id, units = setup_document(tmp_path, count=33)
+    serial = [0]
+
+    def next_pair(unit_id):
+        # A real model answers a repeated request with a different question;
+        # a fixed offset would collide with the fingerprint dedupe instead.
+        serial[0] += 1
+        return pair(unit_id, serial[0])
+
     def call(self, instruction, payload, group=(), **kwargs):
         if payload.get('analysis_phase')=='facts':
             return (facts(group[:-1]) if len(group)==32 else facts(group)), {}
         if 'document_facts' in payload:
             result, stats = finish(payload,group)
-            result['pairs']=[pair(payload['units'][0]['id'], n) for n in range(payload['target'])]
+            result['pairs']=[next_pair(payload['units'][0]['id']) for _ in range(payload['target'])]
             return result, stats
         if 'candidates' in payload:
             return {'checks':[dict(candidate_id=c['candidate_id'], note='中英等义且符合实际证据。',
                                    **{k:True for k in CHECKS+BILINGUAL_CHECKS})
                               for c in payload['candidates']]}, {}
-        return {'pairs':[pair(group[0]['id'],3+n) for n in range(payload['target'])], 'skipped':[]}, {}
+        return {'pairs':[next_pair(group[0]['id']) for _ in range(payload['target'])], 'skipped':[]}, {}
     monkeypatch.setattr(GLMClient,'call',call)
     doc = process(store,doc_id)
     assert doc['status']=='waiting_review' and doc['bilingual_count']==5, doc['error']

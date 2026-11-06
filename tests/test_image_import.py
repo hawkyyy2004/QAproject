@@ -57,8 +57,8 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
         kind = 'analysis' if 'existing_topics' in payload else 'review' if 'candidates' in payload else 'generation'
         seen.append(kind)
         if kind=='generation':
-            assert payload['evidence_mode']=='visual' and payload['target']==2
-            result = {'pairs':[pair(payload['units'][0]['id'],n) for n in range(2)],'skipped':[]}
+            assert payload['evidence_mode']=='visual' and payload['target']==1
+            result = {'pairs':[pair(payload['units'][0]['id'],n) for n in range(1)],'skipped':[]}
             return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':encode(result)}}]})
         body['messages'][1]['content'] = encode(payload)
         return fake_provider(httpx.Request('POST','https://fixture.invalid',content=json.dumps(body)))
@@ -70,20 +70,20 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
     assert seen==['analysis','generation','review','review'],doc['error']
-    assert doc['status']=='waiting_review' and doc['bilingual_count']==2
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==1
     assert doc['pages']==0 and len(doc['units'])==len(doc['assets'])==1
     unit = doc['units'][0]
     assert unit['locator']=='image-0001' and unit['evidence_kind']=='standalone_image'
     assert (unit['width'],unit['height'])==(300,200)
     assert Path(unit['image']).read_bytes()==Path(doc['path']).read_bytes()==raw
-    # A single photo can only carry two questions; the shortfall is reported,
-    # with the full document target and the per-figure cap named.
-    assert '完整目标 10 组' in doc['error'] and '单图最多2组' in doc['error']
+    # A single photo carries one question; the shortfall is reported, with the
+    # full document target and the per-figure rule named.
+    assert '完整目标 10 组' in doc['error'] and '每图 1 组' in doc['error']
     preview = client.get('/api/assets/'+unit['asset_id'])
     assert preview.content==raw and preview.headers['content-type']==mime
     result = client.post('/api/documents/'+doc_id+'/approve',headers=headers)
     assert result.status_code==200,result.text
-    assert store.document(doc_id)['qa_count']==4
+    assert store.document(doc_id)['qa_count']==2
     assert seen==['analysis','generation','review','review']  # Commit adds no model request.
     for c in doc['candidates']:
         assert c['row']['source']==doc['path']+'|image-0001|海洋观测'
@@ -96,7 +96,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     exported = client.get('/api/export?document_id='+doc_id)
     assert exported.status_code==200
     rows = list(csv.DictReader(io.StringIO(exported.content.decode('utf-8-sig'))))
-    assert len(rows)==4 and list(rows[0])==FIELDS
+    assert len(rows)==2 and list(rows[0])==FIELDS
     assert {r['language'] for r in rows}=={'zh','en'}
 
 

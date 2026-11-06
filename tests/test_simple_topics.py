@@ -1,12 +1,16 @@
 """Independent short categories retain separate evidence scopes and reuse across files."""
 from qaproject.glm import GLMClient
 from qaproject.pipeline import Worker, CHECKS, BILINGUAL_CHECKS, approve
+from qaproject.settings import settings
 from qaproject.store import Store
 from test_bilingual import pair
 from test_document_topics import evidence, proposal
 
 
 def test_independent_categories_reuse_across_files_without_extra_requests(tmp_path, monkeypatch):
+    # Topic routing contract, not the per-file quota: pin the older target.
+    monkeypatch.setattr('qaproject.pipeline.settings',
+                        lambda: dict(settings(), target_per_document=5))
     # This taxonomy fixture intentionally repeats synthetic questions across files;
     # semantic duplicate behavior has separate tests and must not load a real model.
     monkeypatch.setattr('qaproject.pipeline.cross_document_duplicate',lambda *a,**kw:{})
