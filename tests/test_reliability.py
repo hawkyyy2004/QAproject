@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from fastapi.testclient import TestClient
 import httpx
@@ -38,6 +39,31 @@ def test_contradictory_review_note_is_not_accepted():
     assert review_note_flags('该公式超出本unit文本。')
     assert review_note_flags('地点未在本unit提供。')
     assert not review_note_flags('数值、对象及范围均与原文一致。')
+
+
+def test_task_of_a_deleted_document_is_dropped_not_retried(tmp_path, monkeypatch):
+    """A queued task can outlive its document (manual reset or delete)."""
+    store = Store(tmp_path/'live')
+    doc_id, _ = store.import_file('gone.csv', b'a,b\n1,2\n', 'live')
+    # Simulate a delete action that removed the document but left its task.
+    raw = sqlite3.connect(store.db)
+    raw.execute('PRAGMA foreign_keys=OFF')
+    raw.execute('DELETE FROM documents WHERE id=?', (doc_id,))
+    raw.commit()
+    raw.close()
+    worker = Worker(store)
+    assert worker.run_once() is True
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]==0
+
+
+def test_document_with_null_units_still_loads(tmp_path):
+    store = Store(tmp_path/'live')
+    doc_id, _ = store.import_file('blank.csv', b'a,b\n1,2\n', 'live')
+    with store.connect() as db:
+        db.execute('UPDATE documents SET units=NULL, timings=NULL WHERE id=?', (doc_id,))
+    doc = store.document(doc_id)
+    assert doc['units']==[] and doc['timings']=={}
 
 
 def test_json_error_keeps_position_without_exposing_raw_response(monkeypatch):

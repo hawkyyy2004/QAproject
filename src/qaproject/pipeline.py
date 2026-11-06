@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,7 +16,7 @@ from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog, load_json
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection, visual_topic_support
-from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority
+from .generation_policy import generation_limits, generation_phases, modality_counts, visual_priority, visual_quota
 from .execution import DEFAULT_LIMITS, WorkInterrupted
 from .source_files import verify_reference
 from .sqlite_support import sqlite_diagnostics
@@ -23,6 +24,23 @@ from .sqlite_support import sqlite_diagnostics
 CHECKS = ['supported', 'independent', 'scope_correct', 'knowledge_value', 'distinct', 'topic_correct']
 BILINGUAL_CHECKS = ['language_correct', 'translation_consistent']
 CROSS_DOCUMENT_DUPLICATE_FLAG = '与全库其他文档已入库问题高度相似'
+
+
+class NoEvidence(ValueError):
+    """The model judged the file to hold no knowledge a formal topic could cite."""
+
+
+def id_discipline(group):
+    """Spell out the request-local ids so table rows are never mistaken for units.
+
+    A one-unit CSV whose text is a multi-row table makes the model cite u2, u3,
+    u22 ... as if every row were its own unit. Those ids do not exist here, so
+    the plan or the facts are rejected and every retry repeats the mistake.
+    """
+    ids = '、'.join(f'u{i}' for i in range(1, len(group) + 1))
+    return ('\n本地ID纪律：本请求只提供 %d 个单元，ID依次为 %s。unit_ids 只能逐字复制这些ID；'
+            '不得按表格的行、页码、条目或子项自行编号，也不得添加 :text 等后缀；'
+            '一个单元内的多行内容仍属于同一个单元。' % (len(group), ids))
 
 
 def quality_flags(row):
@@ -50,10 +68,13 @@ def finish_review(db, document_id):
     if not pending:
         count=db.execute('SELECT COUNT(*) FROM qas q JOIN candidates c ON c.id=q.id WHERE c.document_id=?',(document_id,)).fetchone()[0]
         counts=Store.pair_counts(db,document_id)
-        minimum=settings()['min_per_document']
+        config=settings()
+        minimum=config['min_per_document']
+        limits=generation_limits(config)
         actual=counts['qa_pair_count'] if counts['pair_count'] else count
-        insufficient = (f'实际入库 {count} 条，完整双语 {counts["qa_pair_count"]} 组，低于目标 {minimum} 组；质量优先，不补造。'
-                        if counts['pair_count'] else f'历史单语实际入库 {count} 条，低于目标 {minimum} 条；质量优先，不补造。')
+        goal=f'每篇目标 {limits["target"]} 组（文字 {limits["text"]} + 图片 {limits["visual"]}）'
+        insufficient = (f'实际入库 {count} 条，完整双语 {counts["qa_pair_count"]} 组，低于下限 {minimum} 组；{goal}，质量优先，不补造。'
+                        if counts['pair_count'] else f'历史单语实际入库 {count} 条，低于下限 {minimum} 条；质量优先，不补造。')
         db.execute('UPDATE documents SET status=?,error=? WHERE id=?',
                    ('completed' if actual>=minimum else 'completed_under_min',
                     '' if actual>=minimum else insufficient,document_id))
@@ -89,12 +110,122 @@ def validate_row(row, unit, topic, path):
         raise ValueError('问题以文件或无意义索引为考点。')
 
 
+def normalize_bilingual(q):
+    """Repair the bilingual container the model occasionally misplaces.
+
+    Some responses leave the top-level ``en`` empty and nest the complete
+    English version inside ``zh.en``; the text is usable, only the container
+    is wrong. Anything still missing a language after repair stays invalid.
+    """
+    failed = '双语组必须同时包含中英文问题、依据摘要和答案。'
+    if not isinstance(q, dict):
+        raise ValueError(failed)
+    zh, en = q.get('zh'), q.get('en')
+
+    def complete(version):
+        return isinstance(version, dict) and {'input','thinking','output'} <= set(version)
+
+    if not complete(en) and isinstance(zh, dict) and complete(zh.get('en')):
+        en = zh['en']
+    if not complete(zh) or not complete(en):
+        raise ValueError(failed)
+    fields = ('input', 'thinking', 'output')
+    return dict(q, en={k:en[k] for k in fields}, zh={k:zh[k] for k in fields})
+
+
+UNIT_REF = re.compile(r'(?<![A-Za-z0-9_])u\d{1,3}(?![A-Za-z0-9_])')
+UNIT_IN_ZH_LEAD = re.compile(r'(?<![A-Za-z0-9_])(?:依据|根据|参照|按|见|引自|如|由)\s*u\d{1,3}')
+UNIT_BEFORE_ZH_VERB = re.compile(r'(?<![A-Za-z0-9_])u\d{1,3}\s*(?=给出|显示|指出|表明|说明|记录|提到|所述|中|里|则|可见|可知|称|载|明确|统计|摘录)')
+UNIT_IN_EN_LEAD = re.compile(r'\b(?:in|from|per|by|according to|see)\s+u\d{1,3}\b', re.I)
+UNIT_AFTER_UNIT_WORD = re.compile(r'\b(?:unit|units)\s+u\d{1,3}\b', re.I)
+UNIT_BEFORE_EN_VERB = re.compile(r'\bu\d{1,3}\s+(?=(?:lists|states|shows|reports|cites|gives|notes|says|indicates|records|mentions)\b)', re.I)
+UNIT_AFTER_NAMED_SOURCE_EN = re.compile(r'\b(the (?:passage|text|source))\s+(?:unit\s+)?u\d{1,3}\b', re.I)
+UNIT_AFTER_NAMED_SOURCE_ZH = re.compile(r'原文\s*([中里])?\s*u\d{1,3}')
+CJK_TEXT = re.compile(r'[\u4e00-\u9fff]')
+DUP_SOURCE_ZH = re.compile(r'原文\s*原文')
+DUP_SOURCE_EN = re.compile(r'(?i)\b(the (?:passage|text))\b(?:\s+\1\b)+')
+# Wind/current notation such as "U10 风速" or "u10 = wind[10]" is data, not a
+# reference to a unit. Those tokens must survive the rewrite untouched.
+NOTATION_AFTER = re.compile(
+    r'\s*(?:=|m\s*/?\s*s\b|ms-?\s*1\b|hpa\b|风速|风向|风分量|风场|风矢量|分量|流速)', re.I)
+NOTATION_BEFORE = re.compile(r'(?:风速|风向|风分量|风场|风矢量|分量|流速|风向风速|wind|velocity|current|speed)\s*$', re.I)
+
+
+
+def _dedupe_source_nouns(text):
+    """Collapse ``原文原文`` / ``The text The passage`` left by earlier rewrites."""
+    text = DUP_SOURCE_ZH.sub('原文', text)
+    text = re.sub(r'原文[ \t]+(?=[\u4e00-\u9fff])', '原文', text)
+    return DUP_SOURCE_EN.sub(r'\1', text)
+
+
+def strip_unit_ids(text):
+    """Remove request-local ids such as ``u27`` from text a reader will see.
+
+    Those ids are numbered per request (``u1``..``u32``) and are meaningless
+    outside it: the same ``u27`` in another document is a different passage,
+    and nothing in the exported table maps the number back to a page.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    if not UNIT_REF.search(text):
+        return _dedupe_source_nouns(text)
+    chinese = bool(CJK_TEXT.search(text))
+    text, kept = _protect_notation(text)
+    # When the sentence already names the source, the id is pure noise: drop it.
+    text = UNIT_AFTER_NAMED_SOURCE_EN.sub(r'\1', text)
+    text = UNIT_AFTER_NAMED_SOURCE_ZH.sub(lambda m: '原文'+(m.group(1) or ''), text)
+    text = UNIT_IN_ZH_LEAD.sub('依据原文', text)
+    text = UNIT_BEFORE_ZH_VERB.sub('原文', text)
+    text = UNIT_AFTER_UNIT_WORD.sub('The passage', text)
+    text = UNIT_IN_EN_LEAD.sub('in the passage', text)
+    text = UNIT_BEFORE_EN_VERB.sub('The passage ', text)
+    text = UNIT_REF.sub('原文' if chinese else 'the passage', text)
+    # The model also writes "原文u1"; replacing the id must not double the noun.
+    text = _dedupe_source_nouns(text)
+    for placeholder, original in kept.items():
+        text = text.replace(placeholder, original)
+    return text
+
+
+def _protect_notation(text):
+    """Park wind/current notation such as ``U10`` or ``u10 = ...`` out of reach."""
+    kept = {}
+
+    def park(match):
+        before = text[max(0, match.start() - 12):match.start()]
+        after = text[match.end():match.end() + 12]
+        if not (NOTATION_AFTER.match(after) or NOTATION_BEFORE.search(before)
+                or (before.endswith('"') and after.startswith('"'))):
+            return match.group(0)
+        key = f'\x00{len(kept)}\x00'
+        kept[key] = match.group(0)
+        return key
+
+    return UNIT_REF.sub(park, text), kept
+
+
+def sanitize_review(check):
+    """Keep unit ids out of the reviewer's note before it is shown or stored."""
+    if not isinstance(check, dict):
+        return check
+    clean = dict(check)
+    if isinstance(clean.get('note'), str):
+        clean['note'] = strip_unit_ids(clean['note'])
+    flags = clean.get('local_flags')
+    if isinstance(flags, list):
+        clean['local_flags'] = [strip_unit_ids(f) if isinstance(f, str) else f for f in flags]
+    return clean
+
+
 def validate_pair(q, unit, topic, path):
+    q = normalize_bilingual(q)
     rows = []
     for language in ('zh', 'en'):
         version = q.get(language)
         if not isinstance(version, dict) or set(version) != {'input','thinking','output'}:
             raise ValueError('双语组必须同时包含中英文问题、依据摘要和答案。')
+        version = {k: strip_unit_ids(v) for k, v in version.items()}
         row = dict(version, language=language, source=source_ref(path,unit['locator'],topic['name']), image=unit['image'])
         validate_row(row,unit,topic,path)
         rows.append(row)
@@ -282,8 +413,57 @@ def response_shape_ok(kind, instruction, result):
         return isinstance(result.get('pairs'),list) and isinstance(result.get('skipped'),list)
     if kind=='review':
         return isinstance(result,dict) and isinstance(result.get('checks'),list)
-    if kind=='topic_plan':
+    if kind=='topic_plan' or instruction==ANALYZE:
+        # The single-batch path reuses kind='analysis' for the whole-document
+        # plan, so the prompt, not the stage label, decides the shape.
+        if not isinstance(result,dict):
+            return False
+        if not isinstance(result.get('summary'),str) or not isinstance(result.get('topics'),list):
+            return False
         return isinstance(result,dict) and isinstance(result.get('topics'),list)
+    return True
+
+
+def topic_plan_supported(result, group):
+    """A topic plan may only cite evidence that was actually sent to the model.
+
+    Models occasionally answer with invented ids (``u2``, a trailing ``:text``,
+    or a digit appended to a real id). Such a plan is rejected further down, so
+    it must never enter the cache: a replay would fail in exactly the same way.
+    """
+    topics = result.get('topics') if isinstance(result, dict) else None
+    if not isinstance(topics, list) or not topics:
+        # An empty plan is a rejection, not an answer: retrying must reach the
+        # model again instead of replaying "no topics" forever.
+        return False
+    allowed = {unit['id'] for unit in group}
+    for topic in topics:
+        if not isinstance(topic, dict):
+            return False
+        support = topic.get('unit_ids')
+        if not isinstance(support, list) or not support:
+            return False
+        if any(not isinstance(ref, str) or ref not in allowed for ref in support):
+            return False
+    return True
+
+
+def response_cacheable(kind, instruction, result, group=None):
+    """A response can still be used while being too damaged to replay.
+
+    When the model misplaces the English half of a pair beyond repair, the
+    remaining pairs are kept but the response must not enter the cache: a
+    retry has to reach the model again instead of replaying the same loss.
+    """
+    if (kind=='topic_plan' or instruction==ANALYZE) and group is not None and not topic_plan_supported(result, group):
+        return False
+    if instruction not in (GENERATE, GENERATE+'\n'+REPAIR):
+        return True
+    try:
+        for pair in result.get('pairs', []):
+            normalize_bilingual(pair)
+    except ValueError:
+        return False
     return True
 
 
@@ -302,6 +482,24 @@ def bounded_analysis(groups, run, concurrency):
             group = next(iterator, None)
             if group is not None:
                 pending.append((group, pool.submit(run, group)))
+
+
+def long_document_uncovered(units, selected):
+    """Substantive units no selected topic claims, for documents long enough to hide a tail.
+
+    The plan is written from per-batch facts, so a long paper can come back with
+    only its opening chapters tagged. Those untagged pages are then invisible to
+    generation, which only offers evidence that a topic cites.
+    """
+    substantive = [u for u in units
+                   if not u.get('companion_of') and len((u.get('text') or '').strip()) >= 120]
+    if len(substantive) < 10:
+        return []
+    claimed = {unit_id for topic in selected for unit_id in topic['unit_ids']}
+    missing = [u for u in substantive if u['id'] not in claimed]
+    if len(missing) < max(3, len(substantive)//2):
+        return []
+    return [f'{u["locator"].split("-seg")[0]}《{(u.get("text") or "").strip()[:14]}》' for u in missing]
 
 
 class Worker:
@@ -324,7 +522,12 @@ class Worker:
                 # Do not let a transient queue/database failure kill a slot or
                 # print provider/evidence content through threading.excepthook.
                 try:
-                    self.store.event(None, 'worker_error', {'error_type':type(error).__name__})
+                    # The type alone made an earlier crash undiagnosable; keep the
+                    # message and the failing line, never the request payload.
+                    frames = traceback.extract_tb(error.__traceback__)
+                    where = f'{frames[-1].filename.rsplit(chr(92), 1)[-1]}:{frames[-1].lineno}' if frames else ''
+                    self.store.event(None, 'worker_error', {'error_type': type(error).__name__,
+                        'error': str(error)[:200], 'where': where})
                 except Exception:
                     pass
                 worked = False
@@ -339,7 +542,14 @@ class Worker:
             if not task:
                 return False
             try:
-                self.process(task)
+                try:
+                    self.process(task)
+                except ValueError as error:
+                    if str(error) != '找不到文件':
+                        raise
+                    # The document was deleted after its task was queued.
+                    self.store.drop_task(task['id'])
+                    return True
             finally:
                 self.limits.release(self.store, task)
             return True
@@ -420,7 +630,11 @@ class Worker:
             facts_request = kind=='analysis' and payload.get('analysis_phase')=='facts'
             token_limit = config.get(kind+'_max_tokens', config['max_output_tokens'])
             provider_config = {k:config.get(k) for k in ('base_url','text_model','vision_model','reasoning_effort','json_mode')}
-            request = {'kind':kind, 'prompt':instruction, 'payload':payload,
+            # Only requests that must cite unit ids carry the discipline line;
+            # it is part of the signature, so a plan is cached with its own rule.
+            prompt = (instruction + id_discipline(group)
+                      if group and instruction in (FACTS, ANALYZE, PLAN_AND_GENERATE) else instruction)
+            request = {'kind':kind, 'prompt':prompt, 'payload':payload,
                        'units':group, 'config':provider_config,
                        'review_attempt':task['id'] if kind=='review' and (task.get('review_candidate_id') or task.get('revision_id')) else None}
             # A complete response remains valid when only the output allowance changes.
@@ -442,7 +656,8 @@ class Worker:
                             continue
                     else:
                         cached_result = load_json(cached)['result']
-                        if not response_shape_ok(kind, instruction, cached_result):
+                        if (not response_shape_ok(kind, instruction, cached_result)
+                                or not response_cacheable(kind, instruction, cached_result, group)):
                             # Same poisoning mode as the v05 facts fix: keep the
                             # rejected cache for diagnosis, never replay it.
                             cached.replace(cached.with_suffix('.invalid-'+uid()+'.json'))
@@ -553,7 +768,7 @@ class Worker:
                 try:
                     with self.limits.request(self.stop, lambda: store.task_update(task['id'], self.name, kind)) as wait_seconds:
                         try:
-                            result, stats = GLMClient(config).call(instruction, payload, group, max_tokens=token_limit)
+                            result, stats = GLMClient(config).call(prompt, payload, group, max_tokens=token_limit)
                         except ProviderError as error:
                             error.stats['request_wait_seconds'] = wait_seconds
                             raise
@@ -599,9 +814,15 @@ class Worker:
                         store.event(doc['id'],error.code+'_request_retry',{'run_id':run_id,'stage':kind})
                         continue
                     raise
-            temp = file.with_suffix('.tmp')
-            temp.write_text(encode({'result':result, 'stats':stats}), encoding='utf-8')
-            temp.replace(file)
+            if response_cacheable(kind, instruction, result, group):
+                temp = file.with_suffix('.tmp')
+                temp.write_text(encode({'result':result, 'stats':stats}), encoding='utf-8')
+                temp.replace(file)
+            else:
+                # Usable now, damaged enough that a replay would only repeat
+                # the loss: keep it out of the cache so a retry reaches the model.
+                store.event(doc['id'], 'response_not_cached', {'run_id':run_id, 'stage':kind,
+                            'signature':file.stem, 'code':'bilingual', 'units':len(group)})
             store.event(doc['id'], 'model_call', dict(stats, run_id=run_id, stage=kind, purpose=current_stage))
             return result
 
@@ -676,6 +897,7 @@ class Worker:
                     check['local_flags'] = flags
                     check['note'] = '；'.join([str(check.get('note','')),*flags])
                     passed = False
+                check = sanitize_review(check)
                 check['binding'] = review_binding(candidate, next(u for u in group if u['id']==candidate['unit_id']))
                 with store.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -895,6 +1117,9 @@ class Worker:
             text_groups = list(batches(text_units))
             visual_groups = list(batches(sorted(visual_units, key=visual_priority),
                                          max_images=max(1,min(2,int(config.get('generation_max_images',1))))))
+            # A file without usable figures can only reach the text quota; do not
+            # keep requesting more batches for pairs that cannot exist.
+            attainable = min(limits['target'], limits['text'] + visual_quota(visual_groups, limits))
             generation_groups = text_groups + visual_groups
             stage('analyzing', '读取全文并生成整篇概括主题')
             catalog = store.topics()
@@ -944,19 +1169,35 @@ class Worker:
                         plan_group = [u if u['id'] in first_ids else dict(id=u['id'],image='',text='',language=u['language'],hash=u['hash'])
                                       for u in units if u['id'] in first_ids or u['id'] in reference_ids]
                         first_mode = 'visual' if first_group[0]['image'] else 'text'
-                        first_limit = limits['visual'] if first_mode=='visual' else min(3,limits['text']) if visual_groups else limits['text']
+                        first_limit = (visual_quota(visual_groups, limits) if first_mode=='visual'
+                                       else min(3,limits['text']) if visual_groups else limits['text'])
                         payload.update(units=compact_units(first_group),target=min(3,max(1,int(config.get('generation_batch_size',3))),first_limit),
                                        evidence_mode=first_mode, existing_questions=[])
                         kind, instruction = 'generation', PLAN_AND_GENERATE
                         stage('generating','直接生成整篇概括主题与首批双语问答')
-                for attempt in range(2):
+                # Three attempts: the plan is a single short JSON object, and the
+                # model occasionally answers with an empty or unsupported plan.
+                empty_plan = False
+                for attempt in range(3):
                     try:
                         result = call_cached(kind, instruction, payload, plan_group)
                         if kind=='generation' and (not isinstance(result.get('pairs'),list) or not isinstance(result.get('skipped'),list)):
                             raise ValueError('整篇主题与首批问答须返回同一个完整JSON对象。')
+                        empty_plan = not (result.get('topics') or [])
                         selection = TopicSelection(catalog, units)
                         selection.add(result, topic_units)
                         selected, terms = selection.select()
+                        # A plan that only tags the opening chapters leaves the rest
+                        # of the file with no topic to hang a question on. One
+                        # regeneration with the uncovered units spelled out costs
+                        # one request and cannot loop: later attempts accept the plan.
+                        uncovered = (long_document_uncovered(units, selected)
+                                     if attempt == 0 and not empty_plan else [])
+                        if uncovered:
+                            raise ValueError(
+                                f'整篇归纳只覆盖了前段证据，还有 {len(uncovered)} 个有实质内容的单元没有归入任何主题，'
+                                f'例如 {", ".join(uncovered[:6])}。请通读全文后把这些单元补进各自的主题，'
+                                '主题数量仍限1至5个。')
                         redirects = result.get('legacy_topic_map',{})
                         if not isinstance(redirects,dict):
                             raise ValueError('整篇分类的历史来源映射格式无效。')
@@ -973,7 +1214,15 @@ class Worker:
                             initial_generation = {'group_ids':first_ids,'result':result,'target':payload['target']}
                         break
                     except ValueError as error:
-                        if isinstance(error,ProviderError) or attempt:
+                        if isinstance(error, ProviderError):
+                            raise
+                        if attempt == 2:
+                            # An empty plan that survives three attempts is a
+                            # verdict about the file, not a transient failure:
+                            # a header-only or index-only table has no knowledge
+                            # to attach a formal topic to.
+                            if empty_plan and '未识别到有证据支持的正式主题' in str(error):
+                                raise NoEvidence('模型连续判定该文件没有可支撑正式主题的实质知识，按证据不足归档，不补造主题。') from None
                             raise
                         store.event(doc['id'],'topic_plan_regenerated',{'run_id':run_id,'reason':str(error)})
                         payload = dict(payload, automatic_regeneration='直接重新生成一份完整合法的1至5个概括主题及历史来源映射；不要列更多主题供挑选。',
@@ -1018,94 +1267,113 @@ class Worker:
             visual_unavailable = False
             def generate_batches():
                 nonlocal count, counts, existing, initial_generation, visual_unavailable
-                stage('generating', f'已准备 {count} 组双语草稿；文字约3–5组、图片0–2组')
-                scheduled = ((mode, goal, fill, group)
-                             for mode, goal, fill, groups in generation_phases(text_groups,visual_groups,limits)
-                             for group in groups)
-                for mode, goal, fill, group in scheduled:
-                    group_ids = {u['id'] for u in group}
-                    original_group_ids = set(group_ids)
-                    active_topics = [t for t in doc['topics'] if set(t['unit_ids']) & group_ids]
-                    if not active_topics:
-                        continue
-                    eligible_ids = {unit_id for t in active_topics for unit_id in t['unit_ids']}
-                    group = [u for u in group if u['id'] in eligible_ids]
-                    group_ids = {u['id'] for u in group}
-                    if mode=='visual' and (visual_unavailable or len(visual_attempts)>=2 or frozenset(original_group_ids) in visual_attempts):
-                        continue
-                    # Two short requests may cover this evidence group; then move to other pages.
-                    for _ in range(1 if mode=='visual' else 2):
-                        remaining = min(goal-counts[mode], limits['maximum']-sum(counts.values()))
-                        if fill:
-                            remaining = min(remaining, limits['target']-sum(counts.values()))
-                        if remaining<=0:
-                            break
-                        target = min(remaining,batch_size)
-                        payload = {'units':compact_units(group), 'topics':[{'name':t['name'],'unit_ids':[u for u in t['unit_ids'] if u in group_ids]} for t in active_topics],
-                                   'target':target, 'evidence_mode':mode, 'existing_questions':existing}
-                        if mode=='visual':
-                            visual_attempts.add(frozenset(original_group_ids))
-                        try:
-                            if initial_generation is not None and original_group_ids==initial_generation['group_ids']:
-                                result = initial_generation['result']
-                                initial_generation = None
-                            else:
-                                result = call_cached('generation', GENERATE, payload, group)
-                        except ProviderError as error:
-                            if mode=='visual' and text_groups and error.code in {'json','length','context'}:
-                                # Visual coverage is optional. Do not repeat failing image
-                                # requests across the document when text can fill the target.
-                                visual_unavailable = True
-                                store.event(doc['id'],'optional_visual_unavailable',
-                                            {'run_id':run_id,'reason':error.code,'action':'text_fallback'})
+                stage('generating', f'已准备 {count} 组双语草稿；文字约{limits["text"]}组、图片约{limits["visual"]}组')
+                for mode, goal, fill, groups in generation_phases(text_groups,visual_groups,limits):
+                    # Every evidence group takes one turn before any group takes a
+                    # second share, so quota is not spent on the opening pages.
+                    pending = list(groups)
+                    while pending:
+                        group = pending.pop(0)
+                        group_ids = {u['id'] for u in group}
+                        original_group_ids = set(group_ids)
+                        active_topics = [t for t in doc['topics'] if set(t['unit_ids']) & group_ids]
+                        if not active_topics:
+                            continue
+                        eligible_ids = {unit_id for t in active_topics for unit_id in t['unit_ids']}
+                        group = [u for u in group if u['id'] in eligible_ids]
+                        group_ids = {u['id'] for u in group}
+                        if not group:
+                            continue
+                        visual_cap = max(2, limits['visual'])
+                        if mode=='visual' and (visual_unavailable or len(visual_attempts)>=visual_cap
+                                               or frozenset(original_group_ids) in visual_attempts):
+                            continue
+                        share = max(1, -(-(goal-counts[mode]) // max(1, len(pending)+1)))
+                        taken = 0
+                        reuse_first = (initial_generation is not None
+                                       and original_group_ids==initial_generation['group_ids'])
+                        # Two short requests may cover this evidence group; then move to other pages.
+                        for _ in range(1 if mode=='visual' else 2):
+                            remaining = min(goal-counts[mode], limits['maximum']-sum(counts.values()))
+                            if fill:
+                                remaining = min(remaining, attainable-sum(counts.values()))
+                            remaining = min(remaining, share-taken)
+                            if reuse_first:
+                                # The plan+first-batch request was already sent for up to
+                                # batch_size pairs; keep what it returned inside the quota
+                                # instead of throwing paid work away to satisfy the share.
+                                remaining = max(remaining, min(batch_size, goal-counts[mode],
+                                                               limits['maximum']-sum(counts.values())))
+                            if remaining<=0:
                                 break
-                            if error.code not in {'length','json'} or target==1:
-                                raise
-                            store.event(doc['id'], 'smaller_batch_retry', {'run_id':run_id,'reason':error.code,'target':1})
-                            payload['target'] = 1
-                            result = call_cached('generation', GENERATE, payload, group)
-                            target = 1
-                        if not isinstance(result.get('pairs'),list) or not isinstance(result.get('skipped'),list):
-                            raise ValueError('双语 QA 生成结构无效；必须返回完整中英配对。')
-                        if result['skipped']:
-                            store.event(doc['id'],'generation_skipped',{'run_id':run_id,'reasons':[str(x)[:300] for x in result['skipped'][:3]]})
-                        generated = []
-                        previous_questions = list(existing)
-                        for q in result['pairs'][:target]:
+                            target = min(remaining,batch_size)
+                            payload = {'units':compact_units(group), 'topics':[{'name':t['name'],'unit_ids':[u for u in t['unit_ids'] if u in group_ids]} for t in active_topics],
+                                       'target':target, 'evidence_mode':mode, 'existing_questions':existing}
+                            if mode=='visual':
+                                visual_attempts.add(frozenset(original_group_ids))
                             try:
-                                if not isinstance(q,dict):
-                                    raise ValueError('候选问答结构无效。')
-                                unit = next((u for u in group if u['id']==q.get('unit_id')), None)
-                                topic = next((t for t in active_topics if t['name']==q.get('topic')), None)
-                                if not unit or not topic or unit['id'] not in topic['unit_ids']:
-                                    raise ValueError('QA 引用了未知单元或未获准主题。')
-                                rows = validate_pair(q,unit,topic,doc['path'])
-                            except ValueError as error:
-                                store.event(doc['id'], 'candidate_invalid', {'run_id':run_id,'reason':str(error)})
-                                continue
-                            pair_id = uid()
-                            versions = []
-                            with store.connect() as db:
-                                db.execute('BEGIN IMMEDIATE')
-                                assert_lease(db,task['id'],self.name)
-                                if any(db.execute('SELECT 1 FROM candidates WHERE document_id=? AND fingerprint=?',
-                                                  (doc['id'],normalized(row['input']))).fetchone() for row in rows):
-                                    continue  # Never leave one language behind when either version is a duplicate.
-                                db.execute('INSERT INTO qa_pairs(id,document_id,created) VALUES(?,?,?)',(pair_id,doc['id'],time.time()))
-                                for row in rows:
-                                    cid = uid()
-                                    db.execute('INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                                        (cid,doc['id'],unit['id'],topic['id'],encode(row),digest(row),unit['hash'],normalized(row['input']),'needs_review','{}',time.time()))
-                                    db.execute('INSERT INTO candidate_pairs VALUES(?,?,?)',(cid,pair_id,row['language']))
-                                    versions.append({'candidate_id':cid,'qa':row})
-                            generated.append({'candidate_id':pair_id,'unit_id':unit['id'],'versions':versions})
-                            existing.extend(row['input'] for row in rows)
-                            count += 1
-                            counts[mode] += 1
-                        if not generated:
-                            break
-                        review_candidates(generated,group,previous_questions)
-                        stage('generating', f'已准备 {count} 组双语问答：文字 {counts["text"]} 组、图片 {counts["visual"]} 组')
+                                if reuse_first:
+                                    result = initial_generation['result']
+                                    initial_generation = None
+                                    reuse_first = False
+                                else:
+                                    result = call_cached('generation', GENERATE, payload, group)
+                            except ProviderError as error:
+                                if mode=='visual' and text_groups and error.code in {'json','length','context'}:
+                                    # Visual coverage is optional. Do not repeat failing image
+                                    # requests across the document when text can fill the target.
+                                    visual_unavailable = True
+                                    store.event(doc['id'],'optional_visual_unavailable',
+                                                {'run_id':run_id,'reason':error.code,'action':'text_fallback'})
+                                    break
+                                if error.code not in {'length','json'} or target==1:
+                                    raise
+                                store.event(doc['id'], 'smaller_batch_retry', {'run_id':run_id,'reason':error.code,'target':1})
+                                payload['target'] = 1
+                                result = call_cached('generation', GENERATE, payload, group)
+                                target = 1
+                            if not isinstance(result.get('pairs'),list) or not isinstance(result.get('skipped'),list):
+                                raise ValueError('双语 QA 生成结构无效；必须返回完整中英配对。')
+                            if result['skipped']:
+                                store.event(doc['id'],'generation_skipped',{'run_id':run_id,'reasons':[str(x)[:300] for x in result['skipped'][:3]]})
+                            generated = []
+                            previous_questions = list(existing)
+                            for q in result['pairs'][:target]:
+                                try:
+                                    if not isinstance(q,dict):
+                                        raise ValueError('候选问答结构无效。')
+                                    unit = next((u for u in group if u['id']==q.get('unit_id')), None)
+                                    topic = next((t for t in active_topics if t['name']==q.get('topic')), None)
+                                    if not unit or not topic or unit['id'] not in topic['unit_ids']:
+                                        raise ValueError('QA 引用了未知单元或未获准主题。')
+                                    rows = validate_pair(q,unit,topic,doc['path'])
+                                except ValueError as error:
+                                    store.event(doc['id'], 'candidate_invalid', {'run_id':run_id,'reason':str(error)})
+                                    continue
+                                pair_id = uid()
+                                versions = []
+                                with store.connect() as db:
+                                    db.execute('BEGIN IMMEDIATE')
+                                    assert_lease(db,task['id'],self.name)
+                                    if any(db.execute('SELECT 1 FROM candidates WHERE document_id=? AND fingerprint=?',
+                                                      (doc['id'],normalized(row['input']))).fetchone() for row in rows):
+                                        continue  # Never leave one language behind when either version is a duplicate.
+                                    db.execute('INSERT INTO qa_pairs(id,document_id,created) VALUES(?,?,?)',(pair_id,doc['id'],time.time()))
+                                    for row in rows:
+                                        cid = uid()
+                                        db.execute('INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                            (cid,doc['id'],unit['id'],topic['id'],encode(row),digest(row),unit['hash'],normalized(row['input']),'needs_review','{}',time.time()))
+                                        db.execute('INSERT INTO candidate_pairs VALUES(?,?,?)',(cid,pair_id,row['language']))
+                                        versions.append({'candidate_id':cid,'qa':row})
+                                generated.append({'candidate_id':pair_id,'unit_id':unit['id'],'versions':versions})
+                                existing.extend(row['input'] for row in rows)
+                                count += 1
+                                counts[mode] += 1
+                            if not generated:
+                                break
+                            taken += len(generated)
+                            review_candidates(generated,group,previous_questions)
+                            stage('generating', f'已准备 {count} 组双语问答：文字 {counts["text"]} 组、图片 {counts["visual"]} 组')
             # Keep normal generation first; only failed groups enter the repair path.
             # At most one replacement pass follows; evidence limits still take priority.
             for delivery_pass in range(2):
@@ -1118,7 +1386,7 @@ class Worker:
                         return
                     repair_candidates(failed_keys, units)
                 count, existing, counts = ready_state()
-                if count>=limits['target'] or not failed_keys:
+                if count>=attainable or not failed_keys:
                     break
                 # Failed drafts remain in the uniqueness/audit history; avoid generating them again.
                 with store.connect() as db:
@@ -1130,7 +1398,10 @@ class Worker:
             seconds = round(time.perf_counter()-started,2)
             has_candidates = bool(existing)
             store.update_document(doc['id'], status='waiting_review' if has_candidates else 'insufficient',
-                                  error='' if count>=config['min_per_document'] else f'仅有 {count} 组双语问答通过审核与入库校验，目标 {config["min_per_document"]} 组；不合格草稿已保留，不补造。',
+                                  error='' if count>=config['min_per_document'] else
+                                  (f'仅有 {count} 组双语问答通过审核与入库校验；完整目标 {limits["target"]} 组'
+                                   f'（文字 {limits["text"]} + 图片 {limits["visual"]}，单图最多2组），'
+                                   f'低于 {config["min_per_document"]} 组按证据不足标注；不合格草稿已保留，不补造。'),
                                   seconds=seconds, progress=f'{count} 组双语问答已通过审核与入库校验' if has_candidates else '')
             store.event(doc['id'], 'run_complete', {'run_id':run_id,'seconds':seconds,'timings':timings,'pairs':count,'candidates':len(existing)})
             store.task_update(task['id'],self.name,'waiting_review' if has_candidates else 'insufficient','succeeded')
@@ -1154,6 +1425,20 @@ class Worker:
                         db.execute("UPDATE documents SET status='queued',progress='服务停止，已保留进度，启动后继续' WHERE id=?", (doc['id'],))
                     db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (uid(),doc['id'],'run_interrupted',
                         encode({'run_id':run_id,'stage':current_stage,'seconds':round(time.perf_counter()-started,2)}),time.time()))
+                return
+            if isinstance(error, NoEvidence):
+                # Retrying cannot help: the model read the file three times and
+                # found nothing a formal topic could cite. Archive it as
+                # insufficient instead of showing a retryable failure.
+                message = str(error)
+                store.event(doc['id'],'run_insufficient',{'run_id':run_id,'stage':current_stage,'reason':message,
+                                    'seconds':round(time.perf_counter()-started,2),'timings':timings})
+                store.update_document(doc['id'],status='insufficient',error=message,progress='',
+                                      seconds=round(time.perf_counter()-started,2))
+                try:
+                    store.task_update(task['id'],self.name,'insufficient','succeeded')
+                except ValueError:
+                    pass
                 return
             if isinstance(error,ValueError):
                 message = str(error)

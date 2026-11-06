@@ -392,3 +392,15 @@ scripts/check_sqlite_journal.py可作Windows复测或带--baseline-root做隔离
 完整324项及知识专项30项通过（模型替身）；只读真实默认库112事实→106实体，6个双事实实体均验证绑定与原件成功，无正式数据写入或新增模型调用。报告runtime/entity-development/read-only-check.json。未重启服务或浏览器验收，重启后现有条目即可通过汇总视图呈现；README记录边界。
 
 2026-11-05最新界面要求：知识条目汇总移除知识主题筛选，仅保留搜索/实体类型；列表与导出不传主题，原主题数据保留。已更新脚本缓存版本，浏览器全部207条/属性10条切换正常。
+
+## 2026-11-06 同事反馈：覆盖到后段证据、每篇10组、去掉u编号
+
+同事反馈两件事：QA 几乎都出在文档前段（顺序分配+填满即停），以及 thinking 里出现 `u27` 这类看不懂的编号。
+
+覆盖问题已量化：`dataset_card.md` 6 个单元 10 组草稿落在第 2–4 个单元，`14__抽样手法.md` 19 个单元只用到第 3–9 个。原因在调度而不是模型偏好——`generation_phases` 按批次顺序发请求，`goal` 是整篇配额，前两组吃完就 `break`。
+
+改动：`generation_policy.spread()` 让证据批次首尾交替排队；`generate_batches()` 改为每组先取一份份额（`ceil(剩余配额/剩余组数)`），取满才轮到下一组；已发出的“主题+首批”合批请求不再被份额截断，避免付费结果被丢弃。配额同时提高为每篇 10 组（文字 5 + 图片 5），图片按可用图数封顶（每图最多 2 组），无图文档只做到文字配额，`attainable` 防止为凑 10 组空转第二轮。`target_per_document`/`max_per_document` 在 `config/settings.json` 设为 10，`min_per_document` 仍为 5，作为“证据不足”的下限。
+
+编号问题：`u27` 是 `glm.py` 每次请求内部的临时编号（`refs[unit_id]=f"u{i}"`，按本次发送顺序从 u1 起），只在一次请求内有效，库里、页面、导出表都没有映射，所以读者无法据此回查页码。修法两层：`GENERATE` 提示词明确禁止在 input/thinking/output 出现单元编号；落库前 `validate_pair` 用 `strip_unit_ids()` 清洗（中文写“原文”、英文写 “the passage”，保留“依据原文”“原文给出”“The passage states”这类顺读表达）。历史数据用 `qa_probe/clean_unit_ids.py` 改写 247 条并重算行哈希与审核绑定，304 条已入库记录逐条 `approve(dry_run)` 复核通过，泄漏数为 0。
+
+验证：全套 335 项通过（原 333 项，新增 `spread`、`strip_unit_ids` 及后段覆盖断言，改写 5 项配额断言）。默认 8765 服务已用新代码重启，队列继续处理；本轮未推送 GitLab。

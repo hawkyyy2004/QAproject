@@ -7,6 +7,7 @@ from .execution import WorkInterrupted
 from .conflicts import EditConflict
 from .source_files import verify_reference
 from .sqlite_support import sqlite_diagnostics
+from .pipeline import sanitize_review
 
 
 def members(db, qa_id):
@@ -140,6 +141,7 @@ def process_revision(store, task, worker, call, check_duplicates):
         check = {k:checks[0].get(k) for k in CHECKS+BILINGUAL_CHECKS+['note']}
         check['binding'] = review_binding(group,unit)
         check['local_flags'] = list(dict.fromkeys([f for c in candidates for f in quality_flags(c['row'])]+review_note_flags(check.get('note',''))))
+        check = sanitize_review(check)
         duplicates = check_duplicates([c['row']['input'] for c in candidates if c['row']['language']=='zh'])
         if duplicates:
             check['local_flags'].append(f'{CROSS_DOCUMENT_DUPLICATE_FLAG}（相似度 {max(duplicates.values()):.2f}），本次修改未通过，保留正式原版。')

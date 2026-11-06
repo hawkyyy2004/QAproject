@@ -76,7 +76,9 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     assert unit['locator']=='image-0001' and unit['evidence_kind']=='standalone_image'
     assert (unit['width'],unit['height'])==(300,200)
     assert Path(unit['image']).read_bytes()==Path(doc['path']).read_bytes()==raw
-    assert '目标 5 组' in doc['error']  # Do not hide the normal document quantity shortfall.
+    # A single photo can only carry two questions; the shortfall is reported,
+    # with the full document target and the per-figure cap named.
+    assert '完整目标 10 组' in doc['error'] and '单图最多2组' in doc['error']
     preview = client.get('/api/assets/'+unit['asset_id'])
     assert preview.content==raw and preview.headers['content-type']==mime
     result = client.post('/api/documents/'+doc_id+'/approve',headers=headers)

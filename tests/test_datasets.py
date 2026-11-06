@@ -45,6 +45,49 @@ def test_woce_csv_names_units_and_ranges(tmp_path):
     assert len(rows) == 1 and 'END_DATA' not in rows[0]['text']
 
 
+def test_every_csv_unit_repeats_the_cast_identity(tmp_path):
+    """A salinity question names the station; the unit it came from must prove it."""
+    path = tmp_path/'station.csv'
+    path.write_text(WOCE, encoding='utf-8')
+    items = datasets.csv_units(path)
+    for item in items[1:]:
+        assert item['text'].startswith('站位背景：EXPOCODE=06AQ144')
+        assert 'STNNBR=15' in item['text'].splitlines()[0]
+    assert '数值范围' in items[1]['text']
+
+
+def test_annotation_table_is_sampled_not_cut_into_prose(tmp_path):
+    """A manifest of ids, labels and paths has no mostly-numeric record.
+
+    Treating it as plain text used to cut one unit per 30 lines: a 95,000-row
+    manifest became 3,171 units and 1,583 model calls for one file.
+    """
+    header = ('segment_uid,clip_uid,source_relpath,dataset,split,label,group,'
+              'seg_start_sec,seg_end_sec,padded,npy_relpath')
+    body = '\n'.join(
+        f'{i:04x}_s0000.00,{i:04x},vessel/310.wav,vtuad,train,tug,vessel/310,'
+        f'{i*3}.0,{i*3+3}.0,0,train/tug/{i}.npy' for i in range(120))
+    path = tmp_path/'manifest.csv'
+    path.write_text(header+'\n'+body+'\n', encoding='utf-8')
+    items = datasets.csv_units(path)
+    assert items[0]['text'].startswith('数据表：120 行 x 11 列')
+    assert items[0]['evidence_kind']=='csv_schema'
+    assert 'segment_uid' in items[0]['text'] and 'npy_relpath' in items[0]['text']
+    assert all(item['evidence_kind']!='csv_text' for item in items)
+    assert len(items)<=5
+
+
+def test_short_table_splits_into_two_windows(tmp_path):
+    # 30 rows is too small for the three-window layout but still holds two
+    # depth regimes worth asking about separately.
+    path = tmp_path/'cast.csv'
+    body = '\n'.join(f'{i},{20-i*0.5:.1f}' for i in range(30))
+    path.write_text('depth,temperature\n(m),(degC)\n'+body+'\n', encoding='utf-8')
+    rows = [i for i in datasets.csv_units(path) if i['evidence_kind'] == 'csv_rows']
+    assert [i['locator'] for i in rows] == ['table-01', 'table-02']
+    assert '第 1' in rows[0]['text'] and '第 16' in rows[1]['text']
+
+
 def test_excel_style_csv_keeps_header_without_inventing_units(tmp_path):
     path = tmp_path/'plain.csv'
     path.write_text('depth,temperature\n0,12.5\n10,11.9\n20,11.2\n', encoding='utf-8')

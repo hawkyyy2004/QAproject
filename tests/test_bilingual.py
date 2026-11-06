@@ -9,8 +9,9 @@ import httpx
 import pytest
 
 from qaproject.app import create_app
-from qaproject.glm import GLMClient, ProviderError
-from qaproject.pipeline import Worker, CHECKS, BILINGUAL_CHECKS, approve, reject
+from qaproject.glm import GLMClient, ProviderError, GENERATE
+from qaproject.pipeline import (Worker, CHECKS, BILINGUAL_CHECKS, approve, reject,
+                                response_shape_ok, response_cacheable)
 from qaproject.settings import FIELDS, settings
 from qaproject.store import Store, digest, encode
 
@@ -85,6 +86,57 @@ def test_five_knowledge_points_are_ten_rows_with_same_number_of_calls(setup_pipe
         assert 'QA.csv' in response.headers['content-disposition']
     summary=client.get('/api/documents?summary_only=true').json()[0]
     assert summary['qa_count']==10 and summary['qa_pair_count']==5 and summary['bilingual_count']==5
+
+
+@pytest.mark.parametrize('mutation',['nested_en','extra_en_key'])
+def test_complete_answer_in_the_wrong_container_is_repaired(setup_pipeline,mutation):
+    """The model sometimes nests English under zh.en; the text is still usable."""
+    _,store,_,_,_,behavior,_=setup_pipeline
+    def misplaced(result,payload,units):
+        pairs=[]
+        for q in result['pairs']:
+            q=dict(q)
+            q['zh']=dict(q['zh'],en=q['en'] if mutation=='nested_en' else None)
+            if mutation=='nested_en':
+                q['en']=None
+            pairs.append(q)
+        return dict(result,pairs=pairs)
+    behavior['generation']=misplaced
+    doc=run(setup_pipeline)
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==5
+    assert all(set(c['row'])==set(FIELDS) for c in doc['candidates'])
+    english=[c['row']['input'] for c in doc['candidates'] if c['row']['language']=='en']
+    assert len(english)==5 and all(text.startswith('What was') for text in english)
+
+
+def test_response_without_a_recoverable_english_version_is_not_cached():
+    """A batch keeps its usable pairs, but a damaged one must reach the model again."""
+    zh={'input':'该站温度是多少？','thinking':'证据给出温度。','output':'15摄氏度。'}
+    good={'pairs':[{'unit_id':'u','topic':'t','zh':zh,'en':dict(zh)}],'skipped':[]}
+    assert response_shape_ok('generation',GENERATE,good) and response_cacheable('generation',GENERATE,good)
+    broken={'pairs':[{'unit_id':'u','topic':'t','zh':zh,'en':None}],'skipped':[]}
+    # Shaped well enough to process, too damaged to ever replay.
+    assert response_shape_ok('generation',GENERATE,broken)
+    assert not response_cacheable('generation',GENERATE,broken)
+    # An empty batch with recorded skips is an honest answer, not a broken one.
+    empty={'pairs':[],'skipped':['u1 仅有表头元数据']}
+    assert response_shape_ok('generation',GENERATE,empty) and response_cacheable('generation',GENERATE,empty)
+
+
+def test_a_damaged_generation_response_never_reaches_the_cache(setup_pipeline):
+    """Otherwise every retry replays the same broken output in milliseconds."""
+    _,store,doc_id,_,_,behavior,_=setup_pipeline
+    def damaged(result,payload,units):
+        q=dict(result['pairs'][0],en=None)
+        return dict(result,pairs=[q])
+    behavior['generation']=damaged
+    run(setup_pipeline)
+    for file in (store.root/'runs').glob('*.json'):
+        cached=json.loads(file.read_text(encoding='utf-8'))['result']
+        for pair in cached.get('pairs',[]):
+            assert pair.get('en') is not None, f'坏的生成结果被写进了缓存：{file.name}'
+    with store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='response_not_cached'").fetchone()[0]>0
 
 
 @pytest.mark.parametrize('mutation',['missing_en','blank_answer','same_text','wrong_topic'])

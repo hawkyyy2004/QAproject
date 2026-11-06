@@ -5,7 +5,7 @@ import json
 import pytest
 
 from qaproject.glm import FACTS, GLMClient, ProviderError
-from qaproject.pipeline import compact_units, content_facts, CHECKS, BILINGUAL_CHECKS, approve
+from qaproject.pipeline import compact_units, content_facts, id_discipline, CHECKS, BILINGUAL_CHECKS, approve
 from qaproject.settings import settings
 from qaproject.store import digest, encode
 from test_request_recovery import setup_document, facts, analysis, events, process
@@ -14,7 +14,7 @@ from test_bilingual import pair
 
 def cache_file(store, group, *, legacy=False):
     config = settings()
-    request = dict(kind='analysis', prompt=FACTS,
+    request = dict(kind='analysis', prompt=FACTS + id_discipline(group),
                    payload={'analysis_phase':'facts', 'units':compact_units(group)},
                    units=group, config={k:config.get(k) for k in
                    ('base_url','text_model','vision_model','reasoning_effort','json_mode')}, review_attempt=None)

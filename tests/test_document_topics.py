@@ -86,15 +86,17 @@ def test_alias_reuse_and_coverage_count_real_locations_not_views(tmp_path):
     assert selected[0]['unit_ids']=={unit['id'], view['id']}
 
 
-def test_empty_classification_is_failure_not_success_or_placeholder(tmp_path, monkeypatch):
+def test_empty_classification_is_insufficient_not_placeholder(tmp_path, monkeypatch):
     store = Store(tmp_path/'live')
     doc_id, _ = store.import_file('empty-topics.txt', '不应伪造分类。'.encode(), 'live')
     monkeypatch.setattr(GLMClient, 'call', lambda *a, **kw: ({'summary':'无法归类。', 'topics':[]}, {}))
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
-    assert doc['status']=='failed' and doc['coverage']!='complete'
-    assert '未识别到' in doc['error'] and not doc['candidates'] and not doc['topics']
+    # A file the model reads three times without naming a supportable topic is
+    # archived as insufficient evidence, not left in a retryable failure loop.
+    assert doc['status']=='insufficient' and doc['coverage']!='complete'
+    assert '没有可支撑正式主题的实质知识' in doc['error'] and not doc['candidates'] and not doc['topics']
 
 
 def test_failed_analysis_never_publishes_partial_topics_and_resumes_cached_batches(tmp_path, monkeypatch):

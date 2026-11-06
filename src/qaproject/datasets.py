@@ -14,11 +14,18 @@ import datetime as dt
 import io
 import math
 import re
+from collections import Counter
 from pathlib import Path
 
 MAX_UNIT_CHARS = 3500
 NUMBER = re.compile(r'^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$')
 METADATA_LINE = re.compile(r'^([A-Za-z_][\w .\-]{0,40})\s*=\s*(.+)$')
+
+# Identity of a cast or profile. Every unit repeats it so that a question
+# naming the station can be checked against the unit it was generated from;
+# without it the reviewer rejects the question as unverifiable scope.
+CONTEXT_KEYS = ('EXPOCODE','SECT','STNNBR','CASTNO','DATE','TIME',
+                'LATITUDE','LONGITUDE','DEPTH')
 SKIP_VARIABLE = re.compile(r'(_qc$|_quality_flag$|_bnds$|^crs$|^time_bnds$)', re.I)
 SCIENCE_HINT = ('temperature', 'salinity', 'oxygen', 'nitrate', 'phosphate', 'silicate',
                 'chlorophyll', 'density', 'carbon', 'alkalinity', 'ph', 'depth', 'pressure',
@@ -90,7 +97,18 @@ def _split_table(lines, delimiter):
     start = next((i for i, row in enumerate(reader)
                   if row and sum(_number(x) is not None for x in row) >= max(1, len(row) // 2)), None)
     if start is None:
-        return None, [], [], []
+        # Annotation tables hold ids, labels and paths, so no record is mostly
+        # numeric. Treating them as prose cuts one unit per 30 lines: a 95,000
+        # row manifest became 3,171 units and 1,583 model calls. The most common
+        # field count still identifies the header of a real table.
+        widths = Counter(len(row) for row in reader if len(row) > 1).most_common(1)
+        if not widths or widths[0][1] < 2:
+            return None, [], [], []
+        width = widths[0][0]
+        start = next((i for i, row in enumerate(reader) if len(row) == width), None)
+        if start is None:
+            return None, [], [], []
+        return reader[start], [], [line for line in lines[:start] if line.strip()], reader[start + 1:]
     near = reader[start - 1] if start >= 1 else []
     far = reader[start - 2] if start >= 2 else []
     header, units = near, []
@@ -121,9 +139,14 @@ def csv_units(path, *, max_rows=200000, sample=12, chars=MAX_UNIT_CHARS):
             items.append({'text': '\n'.join(chunk), 'locator': f'record-{index+1:04d}',
                           'evidence_kind': 'csv_text', 'seg': index//30+1})
         return items
-    # Trailing markers such as END_DATA are not records.
-    rows = [row for row in rows
-            if sum(_number(x) is not None for x in row) >= max(1, len(row) // 2)]
+    rows = [row for row in rows if row]
+    if not rows:
+        raise ValueError('CSV 中没有可读取的数据行')
+    # Trailing markers such as END_DATA and half-filled notes are not records.
+    # A row is a record when it carries most of the header's columns; requiring
+    # numeric cells instead would drop every annotation table.
+    threshold = max(2, max(len(row) for row in rows) // 2)
+    rows = [row for row in rows if len(row) >= threshold]
     width = max(len(row) for row in rows)
     header = (header + ['']*width)[:width]
     names = [_clean(x) or f'column_{i+1}' for i, x in enumerate(header)]
@@ -143,22 +166,32 @@ def csv_units(path, *, max_rows=200000, sample=12, chars=MAX_UNIT_CHARS):
             s['hi'] = value if s['hi'] is None else max(s['hi'], value)
     head = [f'数据表：{len(rows)} 行 x {width} 列，分隔符“{delimiter}”']
     kept = [line for line in metadata if not line.lstrip().startswith('#')]
+    facts = {}
     for line in kept[:18]:
         match = METADATA_LINE.match(line.strip())
         if match:
-            head.append(f'{match.group(1).strip()} = {match.group(2).strip()[:120]}')
+            key, value = match.group(1).strip(), match.group(2).strip()[:120]
+            head.append(f'{key} = {value}')
+            facts.setdefault(key.upper(), value)
     head.append('列：' + '；'.join(
         f'{c["name"]}' + (f'({c["unit"]})' if c['unit'] else '') for c in columns))
     items.append({'text': '\n'.join(head)[:chars], 'locator': 'table-schema',
                   'evidence_kind': 'csv_schema', 'seg': 1, 'columns': columns})
+    context = '；'.join(f'{k}={facts[k]}' for k in CONTEXT_KEYS
+                        if facts.get(k) and facts[k].lower() != 'none')
+    prefix = f'站位背景：{context}\n' if context else ''
+
+    def unit_text(body):
+        return prefix + body[:max(0, chars - len(prefix))]
+
     ranges = [f'{s["column"]}{"/"+s["unit"] if s["unit"] else ""}: '
               f'{_fmt(s["lo"])}~{_fmt(s["hi"])}，均值 {_fmt(s["total"]/s["n"]) if s["n"] else "—"}'
               for s in stats if s['n']]
     if ranges:
-        items.append({'text': ('数值范围（全表统计）\n' + '\n'.join(ranges))[:chars],
+        items.append({'text': unit_text('数值范围（全表统计）\n' + '\n'.join(ranges)),
                       'locator': 'table-stats', 'evidence_kind': 'csv_stats', 'seg': 2})
     # Evenly spaced windows, so middle and end of the file are represented too.
-    windows = 3 if len(rows) > sample * 4 else 1
+    windows = 3 if len(rows) > sample * 4 else 2 if len(rows) >= sample * 2 else 1
     size = len(rows) // windows
     for w in range(windows):
         begin = w * size
@@ -171,7 +204,7 @@ def csv_units(path, *, max_rows=200000, sample=12, chars=MAX_UNIT_CHARS):
                            for i in range(width))]
         table += ['\t'.join(_fmt(_number(x)) or x.strip() for x in row[:width]) for _, row in picked]
         label = f'第 {begin+1}–{begin+len(chunk)} 行' if windows > 1 else '全表'
-        items.append({'text': (f'数据表摘录（{label}，每 {step} 行取一行）\n' + '\n'.join(table))[:chars],
+        items.append({'text': unit_text(f'数据表摘录（{label}，每 {step} 行取一行）\n' + '\n'.join(table)),
                       'locator': f'table-{w+1:02d}', 'evidence_kind': 'csv_rows', 'seg': 3+w})
     return items
 

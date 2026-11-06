@@ -30,7 +30,7 @@ function candidateActionError(b,error){
 }
 async function api(path,options={}){const join=path.includes('?')?'&':'?';const response=await fetch(path+join+'mode='+mode,{...options,headers:{'X-QA-Session':bootstrap.session,...options.headers}});if(!response.ok){let body=await response.json().catch(()=>({}));const error=Error(body.detail||'请求失败，请稍后再试。');error.status=response.status;throw error}return response.json()}
 function tag(t){const kind=t.name==='数学'?'math':t.name==='海洋能源'?'energy':'';return `<span class="tag ${kind}">${esc(t.name)}</span>`}
-function updateControls(){const demo=mode==='demo';$('#table-footnote').textContent=demo?'演示每份仅展示 3 条 QA，未按正式数量要求补题':'论文目标5–7组双语；独立图片最多2组，按实际内容生成；每组对应中英2条记录';$('#choose-files').innerHTML=svg('plus')+(demo?'体验文件解析':'选择文件');document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode))}
+function updateControls(){const demo=mode==='demo';$('#table-footnote').textContent=demo?'演示每份仅展示 3 条 QA，未按正式数量要求补题':'每份目标10组双语：文字5组、图片5组，按证据覆盖全篇分配；无图时文字不足不补造；每组对应中英2条记录';$('#choose-files').innerHTML=svg('plus')+(demo?'体验文件解析':'选择文件');document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode))}
 function renderStats(){const active=topics.filter(t=>t.documents>0);const total=documents.reduce((n,d)=>n+d.qa_count,0);const stats=[['文件总数',documents.length,'份','files'],['正式主题',active.length,'个','topic'],['已入库 QA',total,'条','qa']];$('#stats').innerHTML=stats.map(([name,value,unit,icon])=>`<div class="stat"><div class="stat-label">${name}</div><div class="stat-icon">${svg(icon)}</div><div class="stat-bottom"><span class="stat-value">${value}</span><span class="stat-unit">${unit}</span></div></div>`).join('');$('#nav-count').textContent=documents.length;$('#document-count').textContent=documents.filter(d=>d.has_qa_tasks!==0).length;}
 function documentCommitButton(d){
   if(mode!=='live')return '';
@@ -89,7 +89,52 @@ async function upload(files){
   }catch(e){operationStatus('#upload-status',e.message+' 请重新选择文件重试。','error');toast(e.message)}
   finally{uploading=false;button.disabled=false;button.innerHTML=svg('plus')+(mode==='demo'?'体验文件解析':'选择文件');$('#drop-zone').removeAttribute('aria-busy');$('#file-input').value=''}
 }
-const drop=$('#drop-zone');['dragenter','dragover'].forEach(type=>drop.addEventListener(type,e=>{e.preventDefault();drop.classList.add('dragover')}));['dragleave','drop'].forEach(type=>drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('dragover')}));drop.addEventListener('drop',e=>upload(e.dataTransfer.files));
+const SUPPORTED=/\.(pdf|png|jpe?g|webp|txt|md|csv|tsv|nc|nc4)$/i,MAX_DROP_FILES=50;
+const drop=$('#drop-zone'),dropOverlay=$('#drop-overlay');
+const dragTypes=event=>Array.from(event.dataTransfer?.types||[]);
+const isFileDrag=event=>{const types=dragTypes(event);return types.includes('Files')||types.length===0};
+const isInternalDrag=event=>{const types=dragTypes(event);return !types.includes('Files')&&types.some(type=>/^text\/|^application\/x-moz/.test(type))};
+function setDragging(active){drop.classList.toggle('dragover',active);if(dropOverlay)dropOverlay.hidden=!active}
+function collectEntry(entry,out){
+  return new Promise(resolve=>{
+    if(!entry)return resolve();
+    if(entry.isFile){entry.file(file=>{out.push(file);resolve()},()=>resolve());return}
+    const reader=entry.createReader(),readBatch=()=>reader.readEntries(async entries=>{if(!entries.length)return resolve();for(const child of entries)await collectEntry(child,out);readBatch()},()=>resolve());
+    readBatch();
+  });
+}
+function entriesFromDrop(transfer){return transfer.items?Array.from(transfer.items).map(item=>item.webkitGetAsEntry?.()||null).filter(Boolean):[]}
+async function acceptFiles(files,sourceNote=''){
+  if(uploading){toast('正在上传，请等待本批文件提交完成。');return}
+  if(!files.length){
+    const message=`没有读到文件${sourceNote?`（来源类型：${sourceNote}）`:''}。压缩包请先解压；网页或其他应用里的内容请先保存到本地。`;
+    operationStatus('#upload-status',message,'error');toast(message);return;
+  }
+  const accepted=files.filter(file=>SUPPORTED.test(file.name)),skipped=files.length-accepted.length;
+  if(!accepted.length){
+    const message=`不支持的文件格式：${files.slice(0,3).map(file=>file.name).join('、')}。支持 PDF、CSV、NC、图片、TXT、MD。`;
+    operationStatus('#upload-status',message,'error');toast(message);return;
+  }
+  const limited=accepted.slice(0,MAX_DROP_FILES),notes=[];
+  if(skipped)notes.push(`已跳过 ${skipped} 个不支持的格式`);
+  if(accepted.length>MAX_DROP_FILES)notes.push(`一次最多 ${MAX_DROP_FILES} 个，已取前 ${MAX_DROP_FILES} 个`);
+  if(notes.length)toast(notes.join('；'));
+  await upload(limited);
+}
+async function handleDrop(transfer){
+  setDragging(false);
+  const types=dragTypes(transfer),entries=entriesFromDrop(transfer),files=[];
+  if(entries.some(entry=>entry.isDirectory)){for(const entry of entries)await collectEntry(entry,files)}
+  else files.push(...Array.from(transfer.files||[]));
+  if(!files.length&&entries.length){toast('文件夹里没有读到可上传的文件。');return}
+  await acceptFiles(files,types.join('、')||'空');
+}
+const allowDrop=event=>{if(isInternalDrag(event))return false;event.preventDefault();return true};
+window.addEventListener('dragenter',event=>{if(allowDrop(event)&&isFileDrag(event))setDragging(true)},{capture:true});
+window.addEventListener('dragover',event=>{allowDrop(event)},{capture:true});
+window.addEventListener('dragleave',event=>{if(event.relatedTarget===null)setDragging(false)},{capture:true});
+window.addEventListener('drop',event=>{setDragging(false);if(isInternalDrag(event))return;event.preventDefault();handleDrop(event.dataTransfer)},{capture:true});
+document.addEventListener('paste',event=>{const files=Array.from(event.clipboardData?.files||[]);if(!files.length)return;event.preventDefault();acceptFiles(files,'剪贴板')});
 function download(query=''){window.open('/api/export?mode='+mode+query,'_blank')}
 $('#export-all').onclick=()=>download();
 async function runSearch(){const q=$('#theme-query').value.trim(),expectedMode=mode,seq=++searchSeq;clearTimeout(searchTimer);clearTimeout(semanticTimer);$('#search-button').disabled=true;$('#search-button').textContent='搜索中…';$('#search-results').setAttribute('aria-busy','true');$('#search-results').innerHTML='';operationStatus('#search-status','正在搜索主题…');$('#semantic-section').hidden=!q;$('#semantic-results').innerHTML='';$('#semantic-status').textContent=q?'正在查找相关主题…':'';if(q)loadRecommendations(q,expectedMode,seq);try{const result=await api('/api/search?q='+encodeURIComponent(q));if(expectedMode!==mode||seq!==searchSeq)return;operationStatus('#search-status',result.length?`找到 ${result.length} 个${q?'直接匹配':''}主题。`:'没有直接匹配的主题，可更换关键词重试。');$('#search-summary').textContent=q?`“${q}” · ${result.length} 个直接匹配主题`:'主题与涵盖文件';$('#search-results').innerHTML=result.length?result.map(r=>`<article class="topic-result"><div class="topic-result-head"><div><div class="topic-result-name">${svg('topic')}${esc(r.topic.name)}<small>${esc(r.reason)}</small></div><p class="topic-definition">${esc(r.topic.definition)}</p><div class="keywords">${r.terms.map(term=>`<button class="keyword" data-query="${esc(term)}">${esc(term)}</button>`).join('')}</div></div><div class="topic-result-count">${r.documents.length} 份涵盖文件 <button class="button ghost" data-export-topic="${r.topic.id}">${svg('download')}</button></div></div><div class="result-files">${r.documents.map(d=>`<div class="result-file" data-document="${d.id}" tabindex="0"><div class="file-cell"><div class="file-icon">${svg('files')}<span>${esc(d.name.split('.').pop().toUpperCase())}</span></div><div><div class="file-name">${esc(d.name)}</div><div class="file-summary">${esc(d.summary)}</div></div></div><span class="status ${statusClass(d.status)}">${esc(labels[d.status]||d.status)}</span><span class="arrow-button">↗</span></div>`).join('')||'<div class="empty-state">此主题暂未关联资料</div>'}</div></article>`).join(''):'<div class="table-card empty-state"><strong>没有直接匹配的主题</strong>下方可查看相似主题推荐，或更换关键词。</div>';bindDocs($('#search-results'));bindQueries($('#search-results'));$('#search-results').querySelectorAll('[data-export-topic]').forEach(b=>b.onclick=()=>download('&topic_id='+b.dataset.exportTopic))}catch(e){if(expectedMode===mode&&seq===searchSeq){operationStatus('#search-status',e.message+' 点击搜索可重试。','error');toast(e.message)}}finally{if(expectedMode===mode&&seq===searchSeq){$('#search-button').disabled=false;$('#search-button').textContent='搜索';$('#search-results').removeAttribute('aria-busy')}}}

@@ -20,6 +20,10 @@ def test_multibatch_whole_file_topics_share_first_generation_and_keep_call_count
     store.update_document(doc_id,units=units)
     calls=[]
     read=[]
+    serial=[0]
+    def fresh(unit_id):
+        serial[0]+=1
+        return pair(unit_id,serial[0])
     def call(self,instruction,payload,group=(),**kw):
         if payload.get('analysis_phase')=='facts':
             calls.append('facts')
@@ -31,21 +35,23 @@ def test_multibatch_whole_file_topics_share_first_generation_and_keep_call_count
             assert len(read)==5 and 'target' in payload
             actual=payload['units'][0]['id']
             return dict(summary='完整海洋观测。',topics=[dict(proposal('海洋观测',units[0]),unit_ids=read)],
-                        pairs=[pair(actual,n) for n in range(payload['target'])],skipped=[]),{}
+                        pairs=[fresh(actual) for _ in range(payload['target'])],skipped=[]),{}
         if 'candidates' in payload:
             calls.append('review')
             return dict(checks=[dict(candidate_id=c['candidate_id'],note='双语、数值和范围符合证据。',
                         **{k:True for k in CHECKS+BILINGUAL_CHECKS}) for c in payload['candidates']]),{}
         calls.append('generation')
-        return dict(pairs=[pair(group[0]['id'],3+n) for n in range(payload['target'])],skipped=[]),{}
+        return dict(pairs=[fresh(group[0]['id']) for _ in range(payload['target'])],skipped=[]),{}
     monkeypatch.setattr(GLMClient,'call',call)
     worker=Worker(store)
     worker.process(store.claim(worker.name))
     doc=store.document(doc_id)
     assert doc['status']=='waiting_review' and doc['bilingual_count']==5,doc['error']
     assert len(doc['topics'])==1 and all(c['status']=='pending' for c in doc['candidates'])
-    assert len(calls)==5+6 and calls.count('combined')==1
-    assert calls.count('generation')==1 and calls.count('review')==4
+    # Five evidence batches, one shared plan+first-batch call, then the remaining
+    # text quota is spread over the later batches instead of stopping at three.
+    assert calls.count('combined')==1 and calls.count('generation')==2
+    assert len(calls)==5+1+2+6 and calls.count('review')==6
     for c in doc['candidates']:
         approve(store,c['id'],True,c['row_hash'])
     assert store.document(doc_id)['qa_count']==10

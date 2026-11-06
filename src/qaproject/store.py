@@ -326,8 +326,11 @@ class Store:
             if not row:
                 raise ValueError('找不到文件')
             item = dict(row)
-            item['units'] = json.loads(item['units'])
-            item['timings'] = json.loads(item['timings'])
+            # Columns default to '[]' / '{}' but a manual reset (or a future
+            # delete/reset action) can leave NULL; decoding must not turn that
+            # into a TypeError that blocks the whole worker slot.
+            item['units'] = json.loads(item['units'] or '[]')
+            item['timings'] = json.loads(item['timings'] or '{}')
             item['topics'] = [dict(x, keywords=json.loads(x['keywords']), unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
                 'SELECT t.*,dt.keywords,dt.unit_ids FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE document_id=?', (doc_id,))]
             item['search_terms'] = [dict(x, unit_ids=json.loads(x['unit_ids'])) for x in db.execute(
@@ -678,6 +681,11 @@ class Store:
                                 (stage, status, time.time()+1800, task_id, worker, time.time()))
             if result.rowcount != 1:
                 raise ValueError('任务租约已失效')
+
+    def drop_task(self, task_id):
+        """Remove a task whose document no longer exists, so the loop stops retrying."""
+        with self.connect() as db:
+            db.execute('DELETE FROM tasks WHERE id=?', (task_id,))
 
     def search(self, query):
         query = normalized(query)
