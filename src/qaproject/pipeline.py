@@ -382,6 +382,68 @@ def compact_units(units):
     return [dict(id=u['id'], text=model_text(u), language=u['language']) for u in units]
 
 
+BACKGROUND_LIMIT = 1200
+
+
+def visual_background(units, group, limit=BACKGROUND_LIMIT):
+    """Prose around a cropped figure, used only while generating its questions.
+
+    Only real crops (MinerU figure/table) qualify. A whole-page render already
+    shows its own text, so re-sending that OCR would double the noise instead of
+    supplying context. The text never reaches the answer: the prompt requires the
+    question and the answer to hold on the image alone.
+
+    Each paragraph belongs to the figure nearest it, so three figures packed on
+    one page do not all inherit the same block. That shared block is exactly how
+    the borrowed pipeline ended up with identical context for different figures.
+    """
+    kinds = {'pdf_figure', 'pdf_table'}
+    targets = [u for u in group if u.get('image') and u.get('evidence_kind') in kinds]
+    if not targets:
+        return ''
+    at = {u['id']: index for index, u in enumerate(units)}
+    pages = {t['page'] for t in targets}
+    prose = {}
+    for index, unit in enumerate(units):
+        if (not unit.get('image') and unit.get('evidence_kind') == 'extracted_text'
+                and (unit.get('text') or '').strip()):
+            prose.setdefault(unit['page'], []).append(index)
+    # Ownership is decided across every figure on the page, not just the ones in
+    # this batch: otherwise two batches from the same page repeat one block.
+    owned = {}
+    for page in pages:
+        spots = [(at[u['id']], u['id']) for u in units
+                 if u.get('image') and u.get('evidence_kind') in kinds and u['page'] == page]
+        for index in prose.get(page, []):
+            owner = spots[0][1] if len(spots) == 1 else min(spots, key=lambda s: (abs(index - s[0]), s[0]))[1]
+            owned.setdefault(owner, []).append(index)
+    for target in targets:
+        if not owned.get(target['id']) and prose.get(target['page']):
+            # One paragraph shared by three figures cannot be split; the nearest
+            # prose still beats leaving the figure with no context at all.
+            nearest = min(prose[target['page']], key=lambda i: (abs(i - at[target['id']]), i))
+            owned.setdefault(target['id'], []).append(nearest)
+
+    parts, total = [], 0
+    for figure in targets:
+        block = sorted(owned.get(figure['id'], []),
+                       key=lambda i: (abs(i - at[figure['id']]), i))  # closest prose first
+        for index in block:
+            text = (units[index].get('text') or '').strip()
+            need = len(text) + (1 if parts else 0)  # the joining newline counts too
+            if total + need > limit:
+                room = limit - total - (1 if parts else 0)
+                if room < 60:
+                    return '\n'.join(parts)
+                text = text[:room]
+                need = room + (1 if parts else 0)
+            parts.append(text)
+            total += need
+            if total >= limit:
+                return '\n'.join(parts)
+    return '\n'.join(parts)
+
+
 def content_facts(result, group):
     """Check compact batch notes cover every unit, without per-unit prose overhead."""
     items = result.get('facts') if isinstance(result,dict) else None
@@ -959,6 +1021,12 @@ class Worker:
                                'repair':{'pair_id':key,'attempt':attempt+1,
                                          'versions':{c['row']['language']:c['row'] for c in versions},
                                          'review':versions[0]['review']}}
+                    if unit.get('image'):
+                        # A rewritten figure answer must see the same page prose the
+                        # first draft did, or the two passes judge different material.
+                        background = visual_background(all_units, [unit])
+                        if background:
+                            payload['background'] = background
                     stage('repairing', f'根据审核反馈修订中英问答 · 第{attempt+1}次')
                     result = call_cached('generation', GENERATE+'\n'+REPAIR, payload, [unit])
                     error, rows = '', []
@@ -1320,6 +1388,11 @@ class Worker:
                                        'target':target, 'evidence_mode':mode, 'existing_questions':existing}
                             if mode=='visual':
                                 visual_attempts.add(frozenset(original_group_ids))
+                                # The page's own prose tells the model what the figure
+                                # is about; it is context for the question, not for the answer.
+                                background = visual_background(units, group)
+                                if background:
+                                    payload['background'] = background
                             try:
                                 if reuse_first:
                                     result = initial_generation['result']
