@@ -115,13 +115,17 @@ def lease(db, task, worker):
         raise ValueError('任务租约已失效')
 
 
-def enqueue(store, doc_id):
+def enqueue(store, doc_id, after_task_id=None):
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         if not db.execute('SELECT 1 FROM documents WHERE id=?',(doc_id,)).fetchone():
             raise ValueError('找不到文件')
+        if not after_task_id:
+            preparation=db.execute("SELECT task_id FROM corpus_jobs WHERE document_id=? AND status IN ('queued','running','failed')",(doc_id,)).fetchone()
+            if preparation:after_task_id=preparation[0]
         existing = db.execute("SELECT id FROM tasks WHERE document_id=? AND initial_stage='knowledge' AND status IN ('queued','running')",(doc_id,)).fetchone()
         if existing:
+            if after_task_id:db.execute('INSERT OR REPLACE INTO task_dependencies VALUES(?,?)',(existing[0],after_task_id))
             return {'task_id':existing[0],'status':'queued'}
         job = db.execute('SELECT * FROM knowledge_jobs WHERE document_id=?',(doc_id,)).fetchone()
         if job and job['status']=='completed':
@@ -131,6 +135,7 @@ def enqueue(store, doc_id):
             return {'task_id':job['task_id'],'status':'completed'}
         task_id = uid()
         db.execute("INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,'queued','knowledge','knowledge')",(task_id,doc_id))
+        if after_task_id:db.execute('INSERT INTO task_dependencies VALUES(?,?)',(task_id,after_task_id))
         db.execute("""INSERT INTO knowledge_jobs(document_id,task_id,status,updated) VALUES(?,?,'queued',?)
             ON CONFLICT(document_id) DO UPDATE SET task_id=excluded.task_id,status='queued',error='',updated=excluded.updated""",
                    (doc_id,task_id,time.time()))
@@ -171,6 +176,10 @@ def prepare(store, doc, config, heartbeat):
                 return units,0
     if doc['units']:
         return doc['units'],doc['pages']
+    if path.suffix.lower() in {'.html','.htm'}:
+        from .corpus_processing import article
+        from .corpus_web import text_units
+        return text_units(doc,article(path.read_bytes())),0
     # Reuse the single native parser channel; do not add layout/OCR model calls.
     return extract(store,dict(doc,path=str(path)),dict(config,pdf_layout='off'),progress=lambda *_:heartbeat())
 
@@ -514,12 +523,19 @@ def detail(store,entry_id,member_ids=None):
         row_hash=aggregate_hash,evidence_hash=aggregate_evidence_hash,
         kind='reviewed_fact_collection',member_ids=ids,
         note='由逐条审核通过的事实原文表述汇集，未生成新结论；各项审核与原文见下方。'))
-    return dict(first,row=row,row_hash=aggregate_hash,
+    result=dict(first,row=row,row_hash=aggregate_hash,
         evidence_hash=first['evidence_hash'] if len(facts)==1 else aggregate_evidence_hash,
         review=review,fact_count=len(facts),evidence=evidence,entity_version=version,
         topics=unique(f['topic'] for f in facts),source_valid=all(f['source_valid'] for f in facts),
         locator=' / '.join(unique(f['locator'] for f in facts)),
         aggregation='reviewed_facts',aggregate_hash=aggregate_hash)
+    from . import corpus
+    result['source_kind']=corpus._source(store,corpus._document(store,first['document_id']))['kind']
+    result['full_text_semantics']='冻结来源的全部可读正文；逐项摘录仍单独保留，不以模型文字填充原文。'
+    if result['source_valid']:
+        try:result['export_row']=export_row(store,result)
+        except ValueError as error:result['export_warning']=str(error)
+    return result
 
 
 def export_csv(store,**filters):
@@ -534,5 +550,28 @@ def export_csv(store,**filters):
     for entry_id,members in snapshots:
         entry=detail(store,entry_id,json.loads(members))
         if not entry['source_valid']:raise ValueError('存在原件变更或失效的条目，未导出。')
-        writer.writerow(entry['row'])
+        writer.writerow(export_row(store,entry))
     return content.getvalue().encode('utf-8')
+
+
+def export_row(store,entry):
+    """One source-text scope; historical fact and audit rows stay immutable."""
+    from . import corpus
+    from .corpus_processing import source_row
+    def matches(units):
+        binding={u['id']:u['hash'] for u in units}
+        return all(binding.get(f['unit_id'])==f['evidence_hash'] for f in entry['evidence'])
+    with store.connect() as db:
+        versions=db.execute('SELECT id,units_json FROM corpus_versions WHERE document_id=? ORDER BY created DESC,id DESC',(entry['document_id'],)).fetchall()
+        job=db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?',(entry['document_id'],)).fetchone()
+    for version in versions:
+        if matches(json.loads(version['units_json'])):
+            current=corpus.verify(store,version['id'])
+            return source_row([entry['row']],current['units'],current['source_url'],current['title'])
+    units=json.loads(job[0]) if job else []
+    if not matches(units):raise ValueError('知识条目全文来源绑定缺失，未导出不完整正文。')
+    if any('entity_hint' in u for u in units):
+        # A wiki CSV contains separate source records, not one merged webpage.
+        ids={f['unit_id'].rsplit(':seg',1)[0] for f in entry['evidence']}
+        units=[u for u in units if u['id'].rsplit(':seg',1)[0] in ids]
+    return source_row([entry['row']],units)

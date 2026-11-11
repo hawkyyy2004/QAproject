@@ -26,6 +26,8 @@ class CorpusBody(StrictBody):
     title: str = Field(default='',max_length=500)
     source_label: str = Field(default='',max_length=200)
     generate_after: bool = False
+    reprocess: bool = False
+    pdf_engine: Literal['configured','native','mineru'] | None = None
 
 
 class WebBody(StrictBody):
@@ -81,6 +83,13 @@ class NodeBody(StrictBody):
 
 class AnnotationImport(StrictBody):
     records: list[AnnotationBody] = Field(min_length=1,max_length=100)
+
+
+class ReferenceImport(StrictBody):
+    records: list[dict] = Field(min_length=1,max_length=100)
+    source_note: str = Field(min_length=1,max_length=1000)
+    verified: bool = False
+    class_map: dict[str,str] = Field(default_factory=dict,max_length=100)
 
 
 class DecisionBody(StrictBody):
@@ -156,10 +165,10 @@ def register_routes(app, workspace):
         document_id,created=store.import_file(name,page['raw'],'live',task_stage='corpus')
         corpus.register_source(store,document_id,'web',title=body.title or page['title'],
                                source_url=page['url'],source_label=body.source_label)
-        result=corpus.enqueue(store,document_id,kind='web')
+        result=corpus.enqueue(store,document_id,kind='web',metadata={'web_charset':page.get('charset')})
         if body.extract_knowledge:
             from .knowledge import enqueue
-            enqueue(store,document_id)
+            enqueue(store,document_id,after_task_id=result['task_id'])
         return dict(result,id=document_id,document_id=document_id,created=created,
                     source_url=page['url'],title=body.title or page['title'])
 
@@ -201,6 +210,11 @@ def register_routes(app, workspace):
                 results.append(dict(index=index,error=str(error)))
         return dict(items=results,imported=sum('error' not in r for r in results),
                     failed=sum('error' in r for r in results))
+
+    @app.post('/api/corpus/{version_id}/annotations/reference')
+    def import_reference(version_id:str,body:ReferenceImport,mode='live'):
+        from .corpus_annotations import import_reference
+        return import_reference(workspace(mode),version_id,body.records,body.source_note,body.verified,body.class_map)
 
     @app.get('/api/corpus/{version_id}')
     def corpus_detail(version_id:str,mode='live'):

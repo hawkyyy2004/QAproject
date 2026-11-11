@@ -43,7 +43,8 @@ def test_unconfigured_directory_does_not_scan_or_change_upload_pipeline(tmp_path
     assert client.post('/api/library/refresh').json()['enabled'] is False
     calls,_ = provider(monkeypatch)
     result = client.post('/api/imports',files={'files':('a.txt','隔离观测值15。'.encode())}).json()[0]
-    assert Worker(app.state.stores['live']).run_once()
+    assert Worker(app.state.stores['live']).run_once()  # Shared Corpus preparation.
+    assert Worker(app.state.stores['live']).run_once()  # QA consumes the frozen result.
     doc = app.state.stores['live'].document(result['id'])
     assert doc['bilingual_count']==5 and len(calls)==7
     assert not app.state.library.path.exists() and not app.state.library.thread.is_alive()
@@ -93,7 +94,8 @@ def test_library_reference_processes_pdf_without_original_copy(tmp_path,monkeypa
     assert store.document(result['id'])['path']==str(source)
     assert not list((store.root/'originals').iterdir())
     calls,_ = provider(monkeypatch)
-    assert Worker(store).run_once()
+    assert Worker(store).run_once()  # Corpus
+    assert Worker(store).run_once()  # QA
     doc = store.document(result['id'])
     assert doc['bilingual_count']==5 and doc['pages']==2 and len(calls)==7, doc['error']
     assert all(c['row']['source'].startswith(str(source)+'|') for c in doc['candidates'])

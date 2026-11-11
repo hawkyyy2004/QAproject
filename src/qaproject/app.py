@@ -36,6 +36,7 @@ def processing_plan(values):
     if 'corpus_qa' in selected:
         selected.remove('corpus_qa')
         selected.update(('corpus','instruction'))
+    if 'qa' in selected:selected.add('corpus')
     return selected
 
 
@@ -258,13 +259,14 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         return results
 
     def schedule_processing(store,doc_id,created,selected):
+        preparation=None
         if 'corpus' in selected:
             from . import corpus
-            corpus.enqueue(store,doc_id,generate_after='instruction' in selected)
+            preparation=corpus.enqueue(store,doc_id,generate_after='instruction' in selected)
         if 'qa' in selected and (not created or processing_stage(selected)!='queued'):
-            store.ensure_qa_task(doc_id)
+            store.ensure_qa_task(doc_id,after_task_id=preparation['task_id'] if preparation else None)
         if 'knowledge' in selected and (not created or processing_stage(selected)!='knowledge'):
-            knowledge.enqueue(store,doc_id)
+            knowledge.enqueue(store,doc_id,after_task_id=preparation['task_id'] if preparation else None)
 
     @app.get('/api/assets/{asset_id}')
     def asset(asset_id,mode='live'):
@@ -384,7 +386,10 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
     @app.post('/api/documents/{doc_id}/qa')
     def start_qa(doc_id,mode='live'):
         if mode!='live':raise HTTPException(400,'请在真实资料中生成 QA')
-        return workspace(mode).ensure_qa_task(doc_id)
+        store=workspace(mode)
+        from . import corpus
+        preparation=corpus.enqueue(store,doc_id)
+        return store.ensure_qa_task(doc_id,after_task_id=preparation['task_id'])
 
     @app.get('/api/knowledge/export')
     def knowledge_export(mode='live',q:str=Query('',max_length=200),entity_type='',topic='',document_id=''):

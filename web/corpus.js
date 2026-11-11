@@ -27,7 +27,7 @@
   const idpath = v => encodeURIComponent(String(v));
   const items = data => Array.isArray(data) ? data : data?.items || [];
   const text = v => typeof v === 'object' && v !== null ? JSON.stringify(v, null, 2) : String(v ?? '');
-  const statuses = {queued:'等待处理',running:'处理中',pending:'待审核',reviewing:'审核中',approved:'审核通过',committed:'已入库',rejected:'已拒绝',failed:'处理失败',completed:'已完成',ready:'已就绪',parsing:'读取证据',extracting:'整理中',generating:'生成中',cancelled:'已取消',insufficient:'证据不足'};
+  const statuses = {queued:'等待处理',running:'处理中',pending:'待审核',reviewing:'审核中',approved:'审核通过',committed:'已入库',rejected:'已拒绝',failed:'处理失败',completed:'已完成',ready:'资料已归档',parsing:'读取证据',extracting:'整理中',generating:'生成中',cancelled:'已取消',insufficient:'证据不足'};
   Object.assign(statuses,{corpus_preparing:'准备资料',corpus_archiving:'保存成果',corpus_completed:'整理完成',preparing:'校验证据',repairing:'修订中'});
   function jobMessage(j){
     if(j.error)return j.error;
@@ -112,7 +112,7 @@
     $c('#corpus-jobs-panel').hidden=false;$c('#export-all').hidden=true;
     document.querySelectorAll('[data-processing-tab]').forEach(b=>{b.classList.remove('active');b.setAttribute('aria-selected','false');b.tabIndex=-1});
     $c('#corpus-jobs-tab').classList.add('active');$c('#corpus-jobs-tab').setAttribute('aria-selected','true');$c('#corpus-jobs-tab').tabIndex=0;
-    $c('#processing-description').textContent='查看Corpus登记、处理进度与失败原因；整理完成后在资料成果中查看。';
+    $c('#processing-description').textContent='查看资料登记、处理进度与失败原因；整理完成后在资料成果中查看。';
     if(taskCount!==null)$c('#document-count').textContent=taskCount;loadJobs('corpus');
   }
   async function loadList(type) {
@@ -147,12 +147,17 @@
     return (Array.isArray(units)?units:[]).map(u=>`<article class="corpus-evidence"><div class="corpus-evidence-heading"><strong>${html(u.locator||u.unit_id||u.id||'证据单元')}</strong><span class="tag">${html(kinds[u.kind]||u.kind||'文字')}</span></div>${u.asset_id?`<a href="/api/assets/${idpath(u.asset_id)}?mode=${encodeURIComponent(modeQuery())}" target="_blank" rel="noopener"><img loading="lazy" src="/api/assets/${idpath(u.asset_id)}?mode=${encodeURIComponent(modeQuery())}" alt="${html(u.caption||u.locator||'原始图片证据')}"></a>`:''}<pre class="corpus-pre">${html(u.text||u.markdown||u.quote||u.content||'')}</pre>${(u.annotations||[]).map(annotationView).join('')}</article>`).join('')||'<p class="corpus-muted">服务器未提供可展示的证据单元。</p>';
   }
   function annotationView(a){return `<article class="corpus-annotation"><strong>${html(a.unit_id||'')} · ${html(a.kind||'标注')}</strong><pre class="corpus-pre">${html(text(a.value))}</pre><span class="tag">${a.verified===true?'用户已确认':'未人工确认'}</span><p>${html(a.source_note||'未提供来源说明')}</p></article>`}
+  function processingView(c){
+    const p=c.manifest?.processing;if(!p)return '<p class="corpus-muted">历史版本，保留原加工结果。</p>';
+    const images=p.images||[],removed=(p.removed||[]).length,dedup=(p.semantic_dedup||[]).filter(r=>r.review?.equivalent).length;
+    return `<p class="corpus-muted">正文：清理 ${removed} 个网页重复或无关段落；经模型确认合并 ${dedup} 个近重复段落。${p.structure?'论文解析：'+html(p.structure.engine)+'。':''}</p>${images.length?`<p class="corpus-muted">网页配图：收录 ${images.filter(i=>i.status==='accepted').length} 张；排除 ${images.filter(i=>i.status==='excluded').length} 张；失败/未采集 ${images.filter(i=>['failed','deferred'].includes(i.status)).length} 张。</p>`:''}${[...(p.parser_selection?.note?[p.parser_selection.note]:[]),...(p.warnings||[]),...(p.structure?.limitations||[])].map(t=>`<p class="corpus-muted">${html(t)}</p>`).join('')}`;
+  }
   async function openCorpus(id) {
     const seq=openDialog('资料详情','<p class="corpus-muted">正在读取真实资料与证据…</p>');
     try {
       const [raw,annotations]=await Promise.all([request('/api/corpus/'+idpath(id)),request('/api/corpus/'+idpath(id)+'/annotations')]);const c=normalizeCorpus(raw);c.annotations=items(annotations);if(seq!==dialogSeq)return;
       $c('#corpus-dialog-title').textContent=c.title||'资料详情';
-      $c('#corpus-dialog-body').innerHTML=`<div class="corpus-detail-actions">${button('生成指令','generate',id)}${button('下载资料包','download',id)}${['paper','web'].includes(c.kind)?button('导出CSV','csv',id):''}${button('添加标注','annotate',id)}${button('导入标注JSON','annotation-import',id)}</div><dl class="corpus-metadata">${field('类型',kinds[c.kind]||c.kind)}${field('版本',c.version||'未提供')}${field('状态',statuses[c.status]||c.status)}${field('证据单元',c.unit_count??c.units.length)}${field('图片数',c.image_count??'未提供')}${field('项目来源标识',c.source_label)}${field('实际服务器路径',c.actual_source_path||c.source_path)}${c.actual_source_path&&c.actual_source_path!==c.source_path?field('登记来源路径',c.source_path):''}<div class="corpus-field"><dt>原始网址</dt><dd>${sourceURL(c.original_url)}</dd></div></dl>${c.source_error?`<p class="corpus-hint">${html(c.source_error)}</p>`:''}<h3>Markdown原文</h3><pre class="corpus-pre corpus-markdown">${html(c.markdown||'暂无Markdown正文，请查看下方冻结证据。')}</pre><h3>真实证据与原图</h3>${evidenceView(c.units)}<h3>资料标注</h3>${c.annotations.map(annotationView).join('')||'<p class="corpus-muted">暂无资料级标注。</p>'}`;
+      $c('#corpus-dialog-body').innerHTML=`<div class="corpus-detail-actions">${button('生成指令','generate',id)}${button('下载资料包','download',id)}${String(c.source_path||c.title).toLowerCase().endsWith('.pdf')?'<select id="corpus-pdf-engine" aria-label="论文解析方式"><option value="configured">沿用原解析配置</option><option value="mineru">本地MinerU解析</option><option value="native">结构化原生解析</option></select>':''}${button('重新整理','reprocess',id)}${['paper','web'].includes(c.kind)?button('导出CSV','csv',id):''}${button('添加标注','annotate',id)}${button('导入标注JSON','annotation-import',id)}</div><dl class="corpus-metadata">${field('类型',kinds[c.kind]||c.kind)}${field('版本',c.version||'未提供')}${field('状态',statuses[c.status]||c.status)}${field('证据单元',c.unit_count??c.units.length)}${field('图片数',c.image_count??'未提供')}${field('项目来源标识',c.source_label)}${field('实际服务器路径',c.actual_source_path||c.source_path)}${c.actual_source_path&&c.actual_source_path!==c.source_path?field('登记来源路径',c.source_path):''}<div class="corpus-field"><dt>原始网址</dt><dd>${sourceURL(c.original_url)}</dd></div></dl>${c.source_error?`<p class="corpus-hint">${html(c.source_error)}</p>`:''}<p class="corpus-hint">归档表示结构及文件校验通过，不代表全文科学内容已审核。重新整理将创建新版本，保留历史成果与原有QA证据。</p><h3>整理记录</h3>${processingView(c)}<h3>Markdown阅读稿</h3><pre class="corpus-pre corpus-markdown">${html(c.markdown||'暂无Markdown正文，请查看下方冻结证据。')}</pre><h3>真实证据与原图</h3>${evidenceView(c.units)}<h3>资料标注</h3>${c.annotations.map(annotationView).join('')||'<p class="corpus-muted">暂无资料级标注。</p>'}`;
     }catch(e){if(seq===dialogSeq)$c('#corpus-dialog-status').textContent=human(e);notice(human(e))}
   }
   function openWeb() {
@@ -200,11 +205,18 @@
     const seq=openDialog(bulk?'导入图片标注JSON':'添加证据标注','<p class="corpus-muted">正在读取可标注单元…</p>');
     try{const c=normalizeCorpus(await request('/api/corpus/'+idpath(id)));if(seq!==dialogSeq)return;
       if(bulk){
-        $c('#corpus-dialog-body').innerHTML=`<p class="corpus-hint">导入JSON记录数组，每条包含unit_id、kind、value与真实来源说明source_note，可含verified。未明确提供verified=true的记录保持未人工确认。</p><form id="corpus-annotation-form" class="corpus-form"><label>选择JSON文件<input type="file" id="corpus-annotation-file" accept=".json,application/json"></label><label>标注记录<textarea name="records" rows="12" required placeholder="粘贴JSON数组"></textarea></label><details><summary>记录字段说明</summary><p class="corpus-muted">kind为label、bbox或caption。value包含label、box:[x1,y1,x2,y2]及coordinates（normalized或pixel）、或caption。unit_id须对应此成果真实单元。verified缺省为false。</p><p class="corpus-muted">当前单元：${html(c.units.map(u=>u.unit_id||u.id).join('、'))}</p></details>${submit('导入标注')}</form>`;
+        $c('#corpus-dialog-body').innerHTML=`<p class="corpus-hint">支持内部标注或OceanCorpus参考JSON，先选择对应格式。图片必须匹配已登记资料；不读取JSON里的任意本地路径。</p><form id="corpus-annotation-form" class="corpus-form"><label>格式<select name="reference_format"><option value="internal">内部标注（unit_id / kind / value）</option><option value="reference">参考标注（image_path / category 或 object / bnd_box）</option></select></label><label>参考标注来源说明<input name="reference_source"></label><label>类别映射（可选JSON对象）<input name="class_map" placeholder='{"square box":"cube"}'></label><label class="corpus-check"><input type="checkbox" name="reference_verified">已逐项核对参考标注与真实图片</label><label>选择JSON文件<input type="file" id="corpus-annotation-file" accept=".json,application/json"></label><label>标注记录<textarea name="records" rows="12" required placeholder="粘贴JSON数组"></textarea></label><details><summary>记录字段说明</summary><p class="corpus-muted">kind为label、bbox或caption。value包含label、box:[x1,y1,x2,y2]及coordinates（normalized或pixel）、或caption。unit_id须对应此成果真实单元。verified缺省为false。</p><p class="corpus-muted">当前单元：${html(c.units.map(u=>u.unit_id||u.id).join('、'))}</p></details>${submit('导入标注')}</form>`;
         $c('#corpus-annotation-file').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>5*1024*1024)throw Error('标注文件超过5MB，请分批导入。');const data=await file.text();if(seq===dialogSeq)$c('#corpus-annotation-form').elements.records.value=data}catch(err){notice(human(err))}};
         $c('#corpus-annotation-form').onsubmit=e=>{e.preventDefault();submitForm(e.currentTarget,async f=>{
           let records;try{const data=JSON.parse(f.get('records'));records=Array.isArray(data)?data:data.records}catch{throw Error('JSON格式无效，请检查后重试。')}
           if(!Array.isArray(records)||!records.length||records.length>100)throw Error('请提供1–100条标注记录，每批最多100条。');
+          if(f.get('reference_format')==='reference'){
+            if(!f.get('reference_source').trim())throw Error('请填写参考标注的真实来源。');
+            let class_map={};try{class_map=JSON.parse(f.get('class_map')||'{}')}catch{throw Error('类别映射须为JSON对象。')}
+            const result=await post('/api/corpus/'+idpath(id)+'/annotations/reference',{records,source_note:f.get('reference_source').trim(),verified:f.get('reference_verified')==='on',class_map});
+            if(result.failed)throw Error(`已保存 ${result.imported} 条，${result.failed} 条失败：`+result.results.filter(r=>r.error).map(r=>`第${r.index+1}条 ${r.error}`).join('；'));
+            notice('参考标注已登记，原始文本及类别映射可追溯。');openCorpus(id);return;
+          }
           if(records.some(r=>!r||typeof r.source_note!=='string'||!r.source_note.trim()))throw Error('每条标注必须填写真实来源说明source_note。');
           const known=new Set(c.units.filter(u=>u.asset_id).map(u=>String(u.unit_id||u.id)));
           records=records.map(r=>{if(!r||typeof r!=='object'||!known.has(String(r.unit_id))||!['label','bbox','caption'].includes(r.kind)||r.value==null)throw Error('标注须包含当前成果的真实unit_id、kind与value。');return {unit_id:r.unit_id,kind:r.kind,value:typeof r.value==='string'?{[r.kind]:r.value}:r.kind==='bbox'?{box:r.value.box||r.value.coords,coordinates:r.value.coordinates||r.value.coordinate_system,...(r.value.label?{label:r.value.label}:{})}:r.value,verified:r.verified===true,source_note:typeof r.source_note==='string'?r.source_note:''}});
@@ -295,6 +307,7 @@
       if(action==='close'){closeDialog();return}
       if(action==='detail')return openCorpus(id);
       if(action==='generate')return openGenerate(id);
+      if(action==='reprocess'){b.disabled=true;try{const c=await request('/api/corpus/'+idpath(id));await post('/api/documents/'+idpath(c.document_id)+'/corpus',{reprocess:true,pdf_engine:$c('#corpus-pdf-engine')?.value});closeDialog();notice('已排队创建新的资料版本，历史成果保留。');navigateTasks()}catch(err){notice(human(err))}finally{b.disabled=false}return}
       if(action==='csv')return downloadZip('/api/corpus/csv/'+idpath(id),'corpus.csv');
       if(action==='download')return downloadZip('/api/corpus/export/'+idpath(id),'corpus.zip');
       if(action==='instruction')return openInstruction(id);

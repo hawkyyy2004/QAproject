@@ -126,7 +126,7 @@ def text_alternatives(units):
 LAYOUT_PLACEHOLDER = 'Figure evidence. Read the actual cropped image; its caption is below.'
 
 
-def extract(store, doc, config, progress=None):
+def extract(store, doc, config, progress=None, structure_sink=None):
     path = Path(doc['path'])
     folder = store.root / 'assets/images' / doc['id']
     namespace=config.get('asset_namespace')
@@ -136,6 +136,7 @@ def extract(store, doc, config, progress=None):
         folder=folder/namespace
     folder.mkdir(parents=True, exist_ok=True)
     units = []
+    structure_pages = []
     seg_offsets = {}
 
     def add(text, page, seg, image='', asset_id='', locator=None, unit_id=None, **metadata):
@@ -229,7 +230,10 @@ def extract(store, doc, config, progress=None):
                 visual = has_full_page_image(page)
                 flags = pymupdf.TEXTFLAGS_TEXT | (0 if visual else pymupdf.TEXT_PRESERVE_IMAGES)
                 textpage = page.get_textpage(flags=flags)
-                text = page.get_text('text', sort=True, textpage=textpage).strip()
+                text = '' if config.get('corpus_visual_only') else page.get_text('text', sort=True, textpage=textpage).strip()
+                if structure_sink is not None:
+                    from .corpus_processing import page_structure
+                    structure_pages.append(page_structure(page,n,textpage))
                 if visual or has_graphics(page, textpage):
                     pixmap = page.get_pixmap(dpi=144, alpha=False)
                     # Check the final-resolution image: downsampling could erase faint/sparse evidence.
@@ -246,6 +250,9 @@ def extract(store, doc, config, progress=None):
                 if progress and (n % 10 == 0 or n == len(pdf)):
                     progress(n, len(pdf))
             pages = len(pdf)
+            if structure_sink is not None:
+                from .corpus_processing import finish_structure
+                structure_sink(finish_structure(structure_pages))
     elif suffix in {'.png', '.jpg', '.jpeg', '.webp'}:
         raw = path.read_bytes()
         expected = {'.png':'png', '.jpg':'jpeg', '.jpeg':'jpeg', '.webp':'webp'}[suffix]
@@ -308,7 +315,7 @@ def extract(store, doc, config, progress=None):
         pages = 0
     else:
         raise ValueError('支持 PDF、PNG/JPG/WebP、CSV/TSV、netCDF(.nc)、TXT/MD。')
-    if not units:
+    if not units and not (suffix=='.pdf' and config.get('corpus_visual_only')):
         raise ValueError('没有可读取证据')
     for unit in units:
         if unit['image'] and Path(unit['image']).stat().st_size > 5*1024*1024:

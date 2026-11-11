@@ -67,11 +67,13 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     monkeypatch.setattr('qaproject.glm.httpx.Client',lambda **kw:original_client(transport=httpx.MockTransport(provider)))
     monkeypatch.setattr('qaproject.glm.api_key',lambda:'test-placeholder')
     worker = Worker(store)
-    worker.process(store.claim(worker.name))
+    worker.process(store.claim(worker.name))  # Corpus saves original bytes.
+    worker.process(store.claim(worker.name))  # QA reuses that frozen image.
     doc = store.document(doc_id)
     assert seen==['analysis','generation','review','review'],doc['error']
     assert doc['status']=='waiting_review' and doc['bilingual_count']==1
-    assert doc['pages']==0 and len(doc['units'])==len(doc['assets'])==1
+    assert doc['pages']==0 and len(doc['units'])==1
+    assert len({a['hash'] for a in doc['assets']})==1  # Parse/archive assets preserve the same original bytes.
     unit = doc['units'][0]
     assert unit['locator']=='image-0001' and unit['evidence_kind']=='standalone_image'
     assert (unit['width'],unit['height'])==(300,200)
@@ -90,7 +92,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
         assert c['row']['image']==unit['image'] and set(c['row'])==set(FIELDS)
     # Re-entering the existing task after completion reuses evidence and all responses.
     with store.connect() as db:
-        db.execute("UPDATE tasks SET status='queued' WHERE document_id=?",(doc_id,))
+        db.execute("UPDATE tasks SET status='queued' WHERE document_id=? AND initial_stage NOT IN ('corpus','knowledge','instruction')",(doc_id,))
     worker.process(store.claim(worker.name))
     assert seen==['analysis','generation','review','review']
     exported = client.get('/api/export?document_id='+doc_id)

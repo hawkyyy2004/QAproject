@@ -51,7 +51,7 @@ class ArticleParser(HTMLParser):
         elif not self.ignored: self.parts.append(text)
 
 
-def extract_html(raw, charset=None):
+def decode_html(raw, charset=None):
     if isinstance(raw, bytes):
         declared = re.search(br'<meta\b[^>]*\bcharset\s*=\s*["\']?([\w-]+)', raw[:4096], re.I)
         charset = ('utf-8-sig' if raw.startswith(b'\xef\xbb\xbf') else charset or
@@ -59,6 +59,11 @@ def extract_html(raw, charset=None):
         try: text = raw.decode(charset, errors='replace')
         except LookupError: text = raw.decode('utf-8', errors='replace')
     else: text = raw
+    return text
+
+
+def extract_html(raw, charset=None):
+    text=decode_html(raw,charset)
     parser = ArticleParser(); parser.feed(text); parser.close()
     lines = [re.sub(r'[ \t\r\f\v]+', ' ', line).strip() for line in ''.join(parser.parts).splitlines()]
     return dict(title=' '.join(''.join(parser.title).split())[:500],
@@ -91,7 +96,13 @@ def capture(url):
     finally: _CAPTURES.release()
 
 
-def _capture(url):
+def capture_image(url):
+    if not _CAPTURES.acquire(blocking=False):raise ValueError('图片采集繁忙，请稍后重试。')
+    try:return _capture(url,image=True)
+    finally:_CAPTURES.release()
+
+
+def _capture(url, image=False):
     original = url
     deadline = time.monotonic()+35
     for _ in range(6):
@@ -116,7 +127,7 @@ def _capture(url):
             timer.daemon=True;timer.start()
             conn.request('GET', (p.path or '/') + ('?' + p.query if p.query else ''),
                          headers={'User-Agent':'OceanPileQA/1.0 (research corpus capture)',
-                                  'Accept':'text/html,text/plain;q=0.9', 'Accept-Encoding':'identity'})
+                                  'Accept':'image/png,image/jpeg,image/webp' if image else 'text/html,text/plain;q=0.9', 'Accept-Encoding':'identity'})
             response = conn.getresponse()
             if response.status in {301,302,303,307,308}:
                 location = response.getheader('location')
@@ -125,13 +136,25 @@ def _capture(url):
                 continue
             if response.status != 200: raise ValueError(f'网页读取失败（HTTP {response.status}），可导入已保存的 HTML。')
             content_type = response.getheader('content-type','').lower()
-            if not any(t in content_type for t in ('text/html','application/xhtml+xml','text/plain')):
+            if image and content_type.split(';')[0] not in {'image/png','image/jpeg','image/webp'}:
+                raise ValueError('网页图片仅接收真实PNG/JPEG/WebP，不接收SVG或动态图片。')
+            if not image and not any(t in content_type for t in ('text/html','application/xhtml+xml','text/plain')):
                 raise ValueError('该地址不是可读取的 HTML/文字网页，请下载资料后导入。')
             if response.getheader('content-encoding','identity').lower() not in {'','identity'}:
                 raise ValueError('网页返回不支持的压缩编码，请导入已保存的 HTML。')
-            raw = response.read(MAX_BYTES+1)
+            maximum=5*1024*1024 if image else MAX_BYTES
+            raw = response.read(maximum+1)
             if time.monotonic()>=deadline: raise ValueError('网页采集超过总时限，未保存不完整内容。')
-            if len(raw)>MAX_BYTES: raise ValueError('网页超过 8MB 接入限额，未截断保存。')
+            if len(raw)>maximum: raise ValueError('图片超过5MB限额。' if image else '网页超过 8MB 接入限额，未截断保存。')
+            if image:
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(raw)) as picture:
+                    if picture.format not in {'PNG','JPEG','WEBP'} or picture.width*picture.height>40000000:
+                        raise ValueError('网页图片格式或像素数不符合限制。')
+                    width,height=picture.size;fmt=picture.format;picture.verify()
+                return dict(raw=raw,url=url,width=width,height=height,
+                            suffix={'PNG':'.png','JPEG':'.jpg','WEBP':'.webp'}[fmt])
             charset = re.search(r'charset=([^;\s]+)', content_type)
             parsed = extract_html(raw, charset.group(1).strip('"\'') if charset else None) if 'html' in content_type else {
                 'title':host, 'text':raw.decode('utf-8', errors='replace')}
@@ -139,6 +162,7 @@ def _capture(url):
                 raise ValueError('该网址返回错误页面，未登记为知识资料，请核对原始地址。')
             if not parsed['text'].strip(): raise ValueError('网页没有可读正文；动态网页请导入完整保存的页面。')
             return dict(parsed, raw=raw, url=url, requested_url=original,
+                        charset=charset.group(1).strip('"\'') if charset else None,
                         suffix='.html' if 'html' in content_type else '.txt',
                         content_hash=hashlib.sha256(raw).hexdigest())
         except (OSError, http.client.HTTPException) as error:

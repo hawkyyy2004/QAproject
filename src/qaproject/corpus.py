@@ -1,8 +1,7 @@
-"""Immutable, local Corpus snapshots. No model calls and no changes to QA evidence.
+"""Immutable Corpus snapshots with independent structured reading/quality stages.
 
-Bundles are returned as ZIP bytes; originals are read only when verifying/exporting.
-Cleaning v1 only removes explicit repeated ``Page N of M`` margin lines on at
-least three distinct pages. Raw units and exact retained spans remain archived.
+Original QA evidence stays frozen. Corpus-only quality calls share execution limits;
+raw originals, retained text spans, structure and review decisions remain traceable.
 """
 import csv
 import hashlib
@@ -20,6 +19,7 @@ from .persistence import file_hash
 from .settings import settings
 from .source_files import original_path, verify_reference
 from .store import digest, encode, uid
+from . import corpus_processing
 
 KINDS = {'paper', 'web', 'image', 'data'}
 PAPER_FIELDS = ['paper_id', 'title', 'pdf_path', 'md_path', 'images_dir', 'image_count']
@@ -102,7 +102,7 @@ def register_source(store, doc_id, kind, title='', source_url='', source_label='
     return dict(document_id=doc_id, kind=kind, title=title, source_url=source_url, source_label=source_label)
 
 
-def enqueue(store, doc_id, kind='paper', *, title='', source_url='', source_label='', generate_after=False, metadata=None):
+def enqueue(store, doc_id, kind='paper', *, title='', source_url='', source_label='', generate_after=False, metadata=None, reprocess=False,pdf_engine=None):
     doc = _document(store, doc_id)
     source = _source(store, doc)
     # Existing explicit web metadata wins over the historical paper default.
@@ -117,18 +117,26 @@ def enqueue(store, doc_id, kind='paper', *, title='', source_url='', source_labe
         db.execute('BEGIN IMMEDIATE')
         job = db.execute('SELECT * FROM corpus_jobs WHERE document_id=?', (doc_id,)).fetchone()
         merged = dict(json.loads(job['metadata_json']) if job else {}, **(metadata or {}))
+        if pdf_engine not in {None,'configured','native','mineru'}:raise ValueError('无效论文解析方式')
+        if pdf_engine:merged['pdf_engine']=pdf_engine
         encoded = encode(merged)
-        requested = bool(generate_after or (job and job['generate_after']))
+        requested = bool(generate_after if reprocess else generate_after or (job and job['generate_after']))
         active = db.execute("SELECT id,status FROM tasks WHERE document_id=? AND initial_stage='corpus' AND status IN ('queued','running') ORDER BY rowid LIMIT 1", (doc_id,)).fetchone()
+        if reprocess and active:raise ValueError('资料正在整理，请等待当前任务完成。')
+        if reprocess:
+            merged.pop('processing',None);merged['reprocess']=True;encoded=encode(merged)
+            db.execute("UPDATE corpus_jobs SET version_id=NULL,units_json='[]',pages=0 WHERE document_id=?",(doc_id,))
         if active:
             task_id, status = active['id'], active['status']
-        elif job and job['status'] == 'completed' and job['source_hash'] == digest(source):
+        elif not reprocess and job and job['status'] == 'completed' and job['source_hash'] == digest(source):
             db.execute('UPDATE corpus_jobs SET generate_after=?,metadata_json=?,updated=? WHERE document_id=?',
                        (int(requested), encoded, time.time(), doc_id))
             return _job(dict(db.execute('SELECT * FROM corpus_jobs WHERE document_id=?', (doc_id,)).fetchone()))
         else:
             task_id, status = uid(), 'queued'
             db.execute("INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,'queued','corpus','corpus')", (task_id, doc_id))
+            if job:
+                db.execute("UPDATE task_dependencies SET prerequisite_id=? WHERE prerequisite_id=? AND task_id IN (SELECT id FROM tasks WHERE status='queued')",(task_id,job['task_id']))
         db.execute('''INSERT INTO corpus_jobs(document_id,task_id,status,updated,generate_after,metadata_json,source_hash)
           VALUES(?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET task_id=excluded.task_id,
           status=excluded.status,error='',updated=excluded.updated,generate_after=excluded.generate_after,
@@ -215,7 +223,7 @@ def _relocated_images(store, doc_id, units):
     return output
 
 
-def _clean(units):
+def _clean(units, margin_lines=None):
     margins = {}
     pattern = re.compile(r'(?:Page\s+\d+\s+of\s+\d+|第\s*\d+\s*页\s*共\s*\d+\s*页)', re.I)
     for u in units:
@@ -233,11 +241,12 @@ def _clean(units):
             key = re.sub(r'\d+', '#', line.strip().lower())
             remove = (not u['image'] and u['page'] and i in {0,len(lines)-1}
                       and pattern.fullmatch(line.strip()) and len(margins.get(key, ())) >= 3)
+            remove=remove or (not u['image'] and line.strip() in (margin_lines or {}).get(u['page'],set()))
             if not remove: spans.append([offset, offset+len(line)])
             offset += len(line)
         u['text'] = ''.join(text[a:b] for a,b in spans)
         mapping.append(dict(unit_id=u['id'], raw_hash=raw['hash'], retained_spans=spans,
-                            rule='explicit-repeated-page-counter-v1'))
+                            rule='verified-page-margins-and-repeated-counters'))
         output.append(u)
     return output, mapping
 
@@ -253,12 +262,19 @@ def _version_hash(row):
                                       'units_json','manifest_json','content_hash','created')})
 
 
-def _publish(store, doc, source, raw, pages, heartbeat):
+def _publish(store, doc, source, raw, pages, heartbeat, processing=None):
     _units_valid(store, doc['id'], raw)
-    cleaned, mapping = _clean(raw)
+    processing=processing or {}
+    margin_lines={p['page']:{line['text'] for line in p['lines'] if line.get('margin')}
+                  for p in processing.get('structure',{}).get('pages',[])}
+    cleaned, mapping = _clean(raw,margin_lines)
+    cleaned=[u for u in cleaned if u['image'] or u['text'].strip()]
     version_id = uid(); folder = _folder(store, version_id)
     folder.mkdir(parents=True, exist_ok=False)
     units = []; images = {}; assets = []
+    first_page=processing.get('structure',{}).get('pages',[{}])[0]
+    inferred=next((line['text'] for line in first_page.get('lines',[]) if line.get('level')==1 and not line.get('margin') and line.get('kind') not in {'equation','table'}),'')
+    title=source['title'] or inferred or doc['name']
     for u in cleaned:
         heartbeat(); u = dict(u)
         if u['image']:
@@ -273,16 +289,10 @@ def _publish(store, doc, source, raw, pages, heartbeat):
             u.update(image=str(target), asset_id=asset_id)
         if source['kind'] == 'web':
             u['page_urls'] = source['source_url']
-            u['page_titles'] = source['title'] or u.get('page_titles', '') or doc['name']
+            u['page_titles'] = title
         u.pop('hash'); u['hash'] = digest(u); units.append(u)
-    title = source['title'] or doc['name']
-    lines = ['# ' + title.replace('\n', ' ').replace('\r', ' '), '']
-    for u in units:
-        lines.extend(['## ' + u['locator'], '', u['text'], ''])
-        if u['image']:
-            rel = Path(u['image']).relative_to(folder).as_posix()
-            lines.extend(['![真实图像](' + rel + ')', '', '> 图像为真实保存证据；扫描占位提示不是 OCR 正文。', ''])
-    (folder/'document.md').write_text('\n'.join(lines), encoding='utf-8')
+    (folder/'document.md').write_text(corpus_processing.markdown(title,units,processing.get('structure')),encoding='utf-8')
+    (folder/'processing.json').write_text(encode(processing),encoding='utf-8')
     (folder/'evidence.json').write_text(encode(dict(raw_units=raw, cleaning=mapping)), encoding='utf-8')
     image_count = len(images)
     index = None
@@ -297,9 +307,11 @@ def _publish(store, doc, source, raw, pages, heartbeat):
     manifest = dict(format=1, files=files, source=dict(path=doc['path'], content_hash=doc['content_hash'],
                     archive_path='originals/source' + Path(doc['name']).suffix.lower()),
                     source_metadata=source, pages=pages, unit_count=len(units), image_count=image_count,
-                    cleaning_rule='explicit-repeated-page-counter-v1', index=index,
+                    cleaning_rule='verified-page-margins-and-repeated-counters', index=index,
                     internal_audit_files=['evidence.json'],
-                    validation='local structure/hash validation; no scientific/model review')
+                    processing_revision=corpus_processing.REVISION,processing=processing,
+                    full_text_semantics='当前冻结来源全部非图像正文，按顺序去除完全相同段落后以空行连接',
+                    validation='资料已归档：结构/hash校验通过；不表示全文科学内容审核通过')
     (folder/'manifest.json').write_text(encode(manifest), encoding='utf-8')
     row = dict(id=version_id, document_id=doc['id'], kind=source['kind'], status='ready', title=title,
                source_url=source['source_url'], source_label=source['source_label'], units_json=encode(units),
@@ -332,26 +344,67 @@ def process(worker, task):
             else: row = None
         else: row = None
         if row is None:
-            raw = doc['units'] or json.loads(job['units_json']); pages = doc['pages'] if doc['units'] else job['pages']
+            metadata=json.loads(job['metadata_json']);processing=metadata.get('processing',{})
+            engine='native'
+            if path.suffix.lower()=='.pdf':
+                if processing.get('parser_selection'):
+                    engine=processing['parser_selection']['resolved']
+                elif processing.get('structure'):
+                    engine='mineru' if processing['structure']['engine'].startswith('MinerU') else 'native'
+                else:
+                    engine,note=corpus_processing.configured_engine(store,doc,settings(),metadata.get('pdf_engine'))
+                    processing['parser_selection']=dict(requested=metadata.get('pdf_engine') or 'configured',resolved=engine,note=note)
+            checkpoint=json.loads(job['units_json'])
+            raw = checkpoint or doc['units']; pages = job['pages'] if checkpoint else doc['pages']
+            if metadata.get('reprocess'):raw=json.loads(job['units_json']);pages=job['pages']
+            if source['kind']=='web' and path.suffix.lower() in {'.html','.htm'} and not json.loads(job['units_json']):
+                from .corpus_web import prepare
+                raw,processing=prepare(worker,doc,source,path,heartbeat,metadata.get('web_charset'));pages=0
             if not raw:
                 with store.connect() as db:
                     knowledge = db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?', (doc['id'],)).fetchone()
                 raw = json.loads(knowledge[0]) if knowledge else []
                 if raw:
                     pages = doc['pages']
-            if not raw:
-                config = dict(settings(), pdf_layout='off', asset_namespace='corpus-'+uid())
+            if not raw and not processing.get('visual_preparation_complete'):
+                config = dict(settings(), pdf_layout='off', asset_namespace='corpus-'+uid(),corpus_visual_only=engine=='mineru')
                 (raw, pages), wait, seconds = worker.limits.parse(
-                    lambda: extract(store, dict(doc, path=str(path)), config, progress=lambda *_:heartbeat()),
+                    lambda: extract(store, dict(doc, path=str(path)), config, progress=lambda *_:heartbeat(),
+                        **({'structure_sink':lambda value:processing.update(structure=value)} if path.suffix.lower()=='.pdf' and engine=='native' else {})),
                     worker.stop, heartbeat)
+                if path.suffix.lower()=='.pdf' and engine=='mineru':
+                    processing['visual_preparation_complete']=True;metadata['processing']=processing
+                    with store.connect() as db:
+                        db.execute('BEGIN IMMEDIATE');_lease(db,task,worker.name)
+                        db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,metadata_json=? WHERE document_id=?',(encode(raw),pages,encode(metadata),doc['id']))
             raw=_relocated_images(store,doc['id'],raw)
-            _units_valid(store, doc['id'], raw)
+            if raw:_units_valid(store, doc['id'], raw)
+            if path.suffix.lower()=='.pdf' and not processing.get('structure'):
+                structure,_,_=worker.limits.parse(lambda:corpus_processing.mineru_structure(store,dict(doc,path=str(path)),heartbeat) if engine=='mineru' else corpus_processing.pdf_structure(path,heartbeat),worker.stop,heartbeat)
+                if engine=='mineru':
+                    expected=set(range(1,pages+1));actual={p['page'] for p in structure['pages']}
+                    if expected!=actual:raise ValueError('MinerU页面不完整，未截断发布。')
+                    raw=corpus_processing.structured_units(doc,structure,raw)
+                processing['structure']=structure
+            # Freeze preparation before optional model quality checks. A provider
+            # failure must not force another PDF/image preparation on retry.
+            metadata['processing']=processing
+            with store.connect() as db:
+                db.execute('BEGIN IMMEDIATE');_lease(db,task,worker.name)
+                db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,metadata_json=? WHERE document_id=?',
+                           (encode(raw),pages,encode(metadata),doc['id']))
+            if not processing.get('quality_complete'):
+                from .corpus_quality import refine
+                raw,decisions=refine(worker,doc,raw,heartbeat)
+                processing['semantic_dedup']=decisions
+                processing['quality_complete']=True
+            metadata['processing']=processing
             with store.connect() as db:
                 db.execute('BEGIN IMMEDIATE'); _lease(db, task, worker.name)
-                db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,progress=?,updated=? WHERE document_id=?',
-                           (encode(raw), pages, encode({'units':len(raw),'pages':pages}), time.time(), doc['id']))
+                db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,progress=?,metadata_json=?,updated=? WHERE document_id=?',
+                           (encode(raw), pages, encode({'units':len(raw),'pages':pages}),encode(metadata), time.time(), doc['id']))
             stage = 'corpus_archiving'; heartbeat()
-            row, assets = _publish(store, doc, source, raw, pages, heartbeat)
+            row, assets = _publish(store, doc, source, raw, pages, heartbeat,processing)
             _original(store, doc); _units_valid(store, doc['id'], raw)
             with store.connect() as db:
                 db.execute('BEGIN IMMEDIATE'); _lease(db, task, worker.name)
@@ -375,6 +428,10 @@ def process(worker, task):
                 db.execute("UPDATE corpus_jobs SET status=?,error=?,updated=? WHERE document_id=? AND task_id=?",
                            ('queued' if interrupted else 'failed', message, time.time(), task['document_id'], task['id']))
                 db.execute("UPDATE tasks SET status=?,stage='corpus',worker=NULL,lease_until=0 WHERE id=?", ('queued' if interrupted else 'failed', task['id']))
+                if not interrupted:
+                    db.execute("""UPDATE documents SET progress='资料整理失败，后续任务等待重试' WHERE id=? AND EXISTS(
+                      SELECT 1 FROM task_dependencies dep JOIN tasks child ON child.id=dep.task_id
+                      WHERE dep.prerequisite_id=? AND child.status='queued')""",(task['document_id'],task['id']))
             store.event(task['document_id'], 'corpus_failed', dict(stage=stage, error_type=type(error).__name__,
                         seconds=round(time.perf_counter()-started,3), finish_reason='interrupted' if interrupted else 'incomplete'))
         except ValueError: pass
@@ -484,24 +541,22 @@ def _web_export(store, version):
             raise ValueError('网页知识事实或审核绑定已失效')
         key = (row['entity_name'].strip().translate(str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ',
                'abcdefghijklmnopqrstuvwxyz')), row['entity_type'])
-        group = groups.setdefault(key, dict(entity_name=row['entity_name'], entity_type=row['entity_type'], descriptions=[]))
+        group = groups.setdefault(key, dict(entity_name=row['entity_name'], entity_type=row['entity_type'], descriptions=[],facts=[]))
+        group['facts'].append(row)
         if row['entity_description'] not in group['descriptions']:
             group['descriptions'].append(row['entity_description'])
         bindings.append(dict(id=fact['id'], row_hash=fact['row_hash'], evidence_hash=unit['hash']))
-    full_text = '\n\n'.join(u['text'] for u in version['units'] if not u['image'])
     output = io.StringIO(newline=''); writer = csv.DictWriter(output, fieldnames=WEB_FIELDS)
     writer.writeheader()
     for group in groups.values():
-        writer.writerow(dict(entity_name=group['entity_name'], entity_type=group['entity_type'],
-            entity_description='\n\n'.join(group['descriptions']), page_urls=version['source_url'],
-            page_titles=version['title'], full_text=full_text, full_text_length=len(full_text)))
+        writer.writerow(corpus_processing.source_row(group['facts'],version['units'],version['source_url'],version['title']))
     warnings = []
     if not job or job['status'] != 'completed':
         warnings.append('网页知识任务尚未完成；只导出当前已审核且证据匹配的事实，不代表知识整理完成。')
     if not bindings:
         warnings.append('本版本暂无证据 hash 与审核绑定均匹配的知识事实；七字段 CSV 仅含表头。')
     return output.getvalue().encode('utf-8'), dict(facts=bindings, entities=len(groups), warnings=warnings,
-        full_text_semantics='本项目将本版本非图像 clean 文字单元按顺序以空行连接为网页全文；不是官方未公开清洗规则的复刻。')
+        full_text_semantics='统一来源全文：全部冻结非图像正文，按顺序去除完全相同段落后以空行连接；非官方未公开算法的复刻。')
 
 
 def export_bundle(store, version_id):
@@ -533,6 +588,8 @@ def export_bundle(store, version_id):
         unit.pop('hash'); unit['hash'] = digest(unit)
         portable_units.append(unit)
     files['units.json'] = encode(portable_units).encode('utf-8')
+    from .corpus_annotations import reference_files
+    files.update(reference_files(store,version))
     manifest['archive_units_hash'] = digest(portable_units)
     manifest['version_id'] = version_id
     manifest['version_hash'] = version['version_hash']
@@ -573,6 +630,9 @@ def export_official_bundle(store, version_id):
     if version['kind']=='web':
         files['Web/'+name]=data
         files['Web/originals/'+version['document_id']+Path(version['actual_source_path']).suffix]=checked_bytes(version['actual_source_path'],version['content_hash'])
+        for rel in version['manifest']['files']:
+            if rel.startswith('images/'):
+                files['Web/'+rel]=checked_bytes(_safe(folder,rel),version['manifest']['files'][rel])
     else:
         files['Paper/CleanedData/'+name]=data
         base='Paper/CleanedData/ProcessedData/'+version['document_id']+'/'
@@ -580,6 +640,11 @@ def export_official_bundle(store, version_id):
             if rel=='document.md' or rel.startswith('images/'):
                 files[base+rel]=checked_bytes(_safe(folder,rel),version['manifest']['files'][rel])
         files['Paper/Pdf/'+_document(store,version['document_id'])['name']]=checked_bytes(version['actual_source_path'],version['content_hash'])
+    from .instructions import list_annotations
+    if list_annotations(store,version_id):
+        from .corpus_annotations import reference_files
+        prefix='Web/images' if version['kind']=='web' else base+'images'
+        files.update(reference_files(store,version,prefix))
     verify(store,version_id)
     output=io.BytesIO()
     with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:

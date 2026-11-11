@@ -154,8 +154,9 @@ def test_api_default_qa_preserved_and_knowledge_is_separate(tmp_path,provider):
     result=client.post('/api/imports?processing=knowledge',headers=headers,files={'files':('ocean.txt',TEXT.encode())})
     assert result.status_code==200
     store=app.state.stores['live']
+    assert Worker(store).run_once()  # Archive the QA file without model generation.
     with store.connect() as db:
-        qa=db.execute("SELECT * FROM tasks WHERE initial_stage=''").fetchone()
+        qa=db.execute("SELECT * FROM tasks WHERE initial_stage='queued'").fetchone()
         assert qa is not None
         db.execute("UPDATE tasks SET status='succeeded' WHERE id=?",(qa['id'],))
     run(store)
@@ -327,7 +328,8 @@ def test_combined_upload_enqueues_both_once_and_qa_failure_does_not_block_knowle
     store=app.state.stores['live']
     with store.connect() as db:
         rows=db.execute('SELECT * FROM tasks WHERE document_id=? ORDER BY rowid',(doc_id,)).fetchall()
-        assert len(rows)==2 and rows[0]['initial_stage']=='' and rows[1]['initial_stage']=='knowledge'
+        assert [r['initial_stage'] for r in rows]==['corpus','queued','knowledge']
+    assert Worker(store).run_once()  # Shared preparation succeeds before both consumers.
     qa=store.claim('qa');assert qa['stage']=='queued'
     assert store.claim('knowledge') is None
     store.task_update(qa['id'],'qa','failed','failed')
@@ -339,7 +341,7 @@ def test_combined_upload_enqueues_both_once_and_qa_failure_does_not_block_knowle
     assert client.get('/api/qas').json()['total']==0
 
 
-@pytest.mark.parametrize('processing,expected',[('qa',['']),('knowledge',['knowledge']),('both',['','knowledge'])])
+@pytest.mark.parametrize('processing,expected',[('qa',['corpus','queued']),('knowledge',['knowledge']),('both',['corpus','queued','knowledge'])])
 def test_library_processing_choice_is_consistent(tmp_path,processing,expected):
     root=tmp_path/'library';root.mkdir();(root/'ocean.txt').write_text(TEXT,encoding='utf-8')
     app=create_app(tmp_path/'app',workers=False,library_root=root)

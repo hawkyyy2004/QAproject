@@ -41,8 +41,9 @@ def test_independent_processing_selections_queue_only_requested_tasks(tmp_path,s
     with store.connect() as db:
         stages=[row[0] or 'queued' for row in db.execute(
             'SELECT initial_stage FROM tasks WHERE document_id=? ORDER BY rowid',(doc_id,))]
-        assert sorted(stages)==sorted('queued' if x=='qa' else x for x in selected)
-        if 'corpus' in selected:
+        expected=set(selected)|({'corpus'} if 'qa' in selected else set())
+        assert sorted(stages)==sorted('queued' if x=='qa' else x for x in expected)
+        if 'corpus' in expected:
             assert stages[0]=='corpus'
             assert db.execute('SELECT generate_after FROM corpus_jobs WHERE document_id=?',(doc_id,)).fetchone()[0]==0
     if entrypoint=='library':

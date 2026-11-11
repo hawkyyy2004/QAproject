@@ -143,3 +143,4 @@ button:focus-visible,a:focus-visible,input:focus-visible,.qa-editor textarea:foc
 
 .corpus-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:20px}.corpus-toolbar>.corpus-tabs{margin-bottom:0;min-width:0}.corpus-toolbar>.button{flex-shrink:0}
 @media(max-width:520px){.corpus-toolbar{gap:7px}.corpus-toolbar>.corpus-tabs{width:auto;flex:1}.corpus-toolbar .corpus-tabs button{padding:9px 5px;font-size:10px}.corpus-toolbar>.button{padding:9px 10px;font-size:11px}}
+.corpus-detail-actions>select{max-width:100%;min-height:35px;padding:7px 10px;border:1px solid #d7e5eb;border-radius:7px;background:#f9fcfd;color:#315666;font-size:11px}

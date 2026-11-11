@@ -142,6 +142,9 @@ class Store:
               id TEXT PRIMARY KEY, document_id TEXT REFERENCES documents(id),
               status TEXT, worker TEXT, lease_until REAL DEFAULT 0,
               attempts INTEGER DEFAULT 0, stage TEXT DEFAULT 'queued');
+            CREATE TABLE IF NOT EXISTS task_dependencies(
+              task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+              prerequisite_id TEXT NOT NULL REFERENCES tasks(id));
             CREATE TABLE IF NOT EXISTS events(
               id TEXT PRIMARY KEY, document_id TEXT, kind TEXT, detail TEXT, created REAL);
             CREATE TABLE IF NOT EXISTS qa_revisions(
@@ -360,17 +363,21 @@ class Store:
             candidate.pop('row_json', None)
         return item
 
-    def ensure_qa_task(self, doc_id):
+    def ensure_qa_task(self, doc_id, after_task_id=None):
         """A knowledge-only import may subsequently enter the unchanged QA pipeline."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if not db.execute('SELECT 1 FROM documents WHERE id=?',(doc_id,)).fetchone():
                 raise ValueError('找不到文件')
             old=db.execute("SELECT id,status FROM tasks WHERE document_id=? AND COALESCE(NULLIF(initial_stage,''),stage) NOT IN ('knowledge','corpus','instruction') ORDER BY rowid LIMIT 1",(doc_id,)).fetchone()
-            if old:return dict(task_id=old['id'],status=old['status'])
+            if old:
+                if after_task_id and old['status']=='queued':
+                    db.execute('INSERT OR REPLACE INTO task_dependencies VALUES(?,?)',(old['id'],after_task_id))
+                return dict(task_id=old['id'],status=old['status'])
             task_id=uid()
             db.execute("INSERT INTO tasks(id,document_id,status,stage,initial_stage) VALUES(?,?,'queued','queued','queued')",(task_id,doc_id))
-            db.execute("UPDATE documents SET status='queued',progress='等待生成双语 QA' WHERE id=?",(doc_id,))
+            if after_task_id:db.execute('INSERT INTO task_dependencies VALUES(?,?)',(task_id,after_task_id))
+            db.execute("UPDATE documents SET status='queued',progress=? WHERE id=?",('等待资料整理完成，随后生成双语QA' if after_task_id else '等待生成双语 QA',doc_id))
         return dict(task_id=task_id,status='queued')
 
     def import_reference(self, path, content_hash, root, version, task_stage='queued'):
@@ -673,6 +680,8 @@ class Store:
                 filters.append('t.document_id NOT IN ('+','.join('?' for _ in excluded_documents)+')')
                 args.extend(excluded_documents)
             row = db.execute("""SELECT t.* FROM tasks t WHERE t.status='queued'
+                AND NOT EXISTS(SELECT 1 FROM task_dependencies dep JOIN tasks parent ON parent.id=dep.prerequisite_id
+                  WHERE dep.task_id=t.id AND parent.status!='succeeded')
                 AND NOT EXISTS(SELECT 1 FROM tasks active WHERE active.document_id=t.document_id AND active.status='running')"""+
                 ''.join(' AND '+part for part in filters)+
                 " ORDER BY CASE WHEN COALESCE(NULLIF(t.initial_stage,''),t.stage)='quality_queued' OR t.review_candidate_id IS NOT NULL OR t.revision_id IS NOT NULL THEN 2 WHEN COALESCE(NULLIF(t.initial_stage,''),t.stage)='topic_reclassification' THEN 1 ELSE 0 END,t.rowid LIMIT 1", args).fetchone()
