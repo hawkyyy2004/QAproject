@@ -8,7 +8,8 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from .glm import GLMClient, ProviderError, ANALYZE, FACTS, PLAN_AND_GENERATE, GENERATE, REVIEW, REVIEW_SKEPTIC, REPAIR
+from .glm import (GLMClient, ProviderError, ANALYZE, BLIND, FACTS, PLAN_AND_GENERATE, GENERATE,
+                  REVIEW, REVIEW_SKEPTIC, REPAIR)
 from .parsers import extract, text_alternatives, model_text, text_view_matches
 from .semantic import cross_document_duplicate, DedupUnavailable
 from .settings import FIELDS, ROOT, settings, source_ref
@@ -383,6 +384,33 @@ def compact_units(units):
 
 
 BACKGROUND_LIMIT = 1200
+FIGURE_REF = re.compile(r'(?:图|Fig\.?|Figure)\s*(\d+)', re.I)
+TABLE_REF = re.compile(r'(?:表|Tab\.?|Table)\s*(\d+)', re.I)
+TABLE_REF_EN = re.compile(r'(?:Tab\.?|Table)\s*(\d+)', re.I)
+
+
+def figure_key(unit):
+    """The ('figure'|'table', number) a caption announces, or None.
+
+    Figures and tables share a numbering space in most papers, so the kind has
+    to be part of the key: prose saying "图1" must never claim the table on the
+    same page just because both are numbered 1.
+    """
+    text = unit.get('text') or ''
+    table = unit.get('evidence_kind') == 'pdf_table'
+    # "表16个典型变量" is ambiguous once the space is lost: 表1 + 6个, not 表16.
+    # The English half of a bilingual caption (Tab. 1) resolves it.
+    patterns = (TABLE_REF_EN, TABLE_REF, FIGURE_REF) if table else (FIGURE_REF,)
+    for pattern in patterns:
+        found = pattern.search(text)
+        if found:
+            return ('table' if table else 'figure', found.group(1))
+    return None
+
+
+def cited_refs(text):
+    return ({('figure', m.group(1)) for m in FIGURE_REF.finditer(text)}
+            | {('table', m.group(1)) for m in TABLE_REF.finditer(text)})
 
 
 def visual_background(units, group, limit=BACKGROUND_LIMIT):
@@ -393,9 +421,12 @@ def visual_background(units, group, limit=BACKGROUND_LIMIT):
     supplying context. The text never reaches the answer: the prompt requires the
     question and the answer to hold on the image alone.
 
-    Each paragraph belongs to the figure nearest it, so three figures packed on
-    one page do not all inherit the same block. That shared block is exactly how
-    the borrowed pipeline ended up with identical context for different figures.
+    A paragraph that names a figure belongs to that figure even when it sits
+    closer to another one, and a paragraph naming several figures is correctly
+    shared by all of them. Only unnamed prose falls back to the nearest figure.
+    Sharing a block merely because the page has too little prose is what the
+    borrowed pipeline did, and it produced identical context for different
+    figures; such a figure now gets no background instead.
     """
     kinds = {'pdf_figure', 'pdf_table'}
     targets = [u for u in group if u.get('image') and u.get('evidence_kind') in kinds]
@@ -405,30 +436,36 @@ def visual_background(units, group, limit=BACKGROUND_LIMIT):
     pages = {t['page'] for t in targets}
     prose = {}
     for index, unit in enumerate(units):
+        # A text view of an image is not prose: it repeats the very evidence the
+        # figure already carries, so a neighbouring figure must not inherit it.
         if (not unit.get('image') and unit.get('evidence_kind') == 'extracted_text'
-                and (unit.get('text') or '').strip()):
+                and not unit.get('companion_of') and (unit.get('text') or '').strip()):
             prose.setdefault(unit['page'], []).append(index)
-    # Ownership is decided across every figure on the page, not just the ones in
-    # this batch: otherwise two batches from the same page repeat one block.
     owned = {}
     for page in pages:
-        spots = [(at[u['id']], u['id']) for u in units
+        spots = [(at[u['id']], u) for u in units
                  if u.get('image') and u.get('evidence_kind') in kinds and u['page'] == page]
+        named = {}
+        for _, unit in spots:
+            key = figure_key(unit)
+            if key:
+                named.setdefault(key, []).append(unit['id'])
         for index in prose.get(page, []):
-            owner = spots[0][1] if len(spots) == 1 else min(spots, key=lambda s: (abs(index - s[0]), s[0]))[1]
-            owned.setdefault(owner, []).append(index)
-    for target in targets:
-        if not owned.get(target['id']) and prose.get(target['page']):
-            # One paragraph shared by three figures cannot be split; the nearest
-            # prose still beats leaving the figure with no context at all.
-            nearest = min(prose[target['page']], key=lambda i: (abs(i - at[target['id']]), i))
-            owned.setdefault(target['id'], []).append(nearest)
+            owners = [fid for key, ids in named.items() if key in cited_refs(units[index]['text'])
+                      for fid in ids]
+            if not owners:
+                owners = [min(spots, key=lambda s: (abs(index - s[0]), s[0]))[1]['id']]
+            for owner in owners:
+                owned.setdefault(owner, []).append(index)
 
-    parts, total = [], 0
+    parts, total, seen = [], 0, set()
     for figure in targets:
-        block = sorted(owned.get(figure['id'], []),
+        # One paragraph names two figures: both own it, but it is still one
+        # block of prose and must not be sent twice.
+        block = sorted({i for i in owned.get(figure['id'], []) if i not in seen},
                        key=lambda i: (abs(i - at[figure['id']]), i))  # closest prose first
         for index in block:
+            seen.add(index)
             text = (units[index].get('text') or '').strip()
             need = len(text) + (1 if parts else 0)  # the joining newline counts too
             if total + need > limit:
@@ -442,6 +479,25 @@ def visual_background(units, group, limit=BACKGROUND_LIMIT):
             if total >= limit:
                 return '\n'.join(parts)
     return '\n'.join(parts)
+
+
+def blind_passes(blind):
+    """An image question survives only if the crop alone answers it."""
+    return blind is None or blind.get('consistent') is True
+
+
+def reusable_prepared_units(units, doc, config):
+    """Whether corpus-archived evidence can feed QA as it is.
+
+    Corpus archiving parses PDFs with pdf_layout='off', so its images are whole
+    page renders. QA with MinerU enabled must re-parse instead of inheriting
+    them, or every figure question silently degrades to reading page text.
+    """
+    if Path(doc.get('path') or '').suffix.lower() != '.pdf':
+        return True
+    if str(config.get('pdf_layout', 'auto')).lower() not in {'auto', 'manifest'}:
+        return True
+    return not any(u.get('evidence_kind') == 'pdf_page' for u in units)
 
 
 def content_facts(result, group):
@@ -886,6 +942,55 @@ class Worker:
             store.event(doc['id'], 'model_call', dict(stats, run_id=run_id, stage=kind, purpose=current_stage))
             return result
 
+        def blind_check(candidate, group):
+            """Answer a figure question from the crop alone.
+
+            At inference a trained model receives the image, never the caption or
+            the page prose. An answer that needs either one looks correct here and
+            stays unanswerable there, so the candidate is judged against what the
+            image alone supports.
+            """
+            if not config.get('blind_verify', True):
+                return None
+            unit = next((u for u in group if u['id']==candidate['unit_id']), None)
+            if not unit or not unit.get('image'):
+                return None
+            # Only evidence lifted out of a document carries a caption or page
+            # prose the answer could lean on. A standalone image has neither, so
+            # the ordinary review already sees what a trained model will see.
+            if unit.get('evidence_kind') not in {'pdf_figure', 'pdf_table', 'pdf_page'}:
+                return None
+            zh = next((v['qa'] for v in candidate['versions'] if v['qa']['language']=='zh'), None)
+            if not zh:
+                return None
+            # Keep the review-shaped envelope so stage accounting and every
+            # existing caller treat this as one more review of the same group;
+            # only the caption-free unit makes the answer blind.
+            blind_unit = dict(unit, text='')
+            try:
+                result = call_cached('review', BLIND,
+                                     {'candidates':[{'candidate_id':candidate['candidate_id'],
+                                                     'versions':[{'qa':zh}]}],
+                                      'units':compact_units([blind_unit]),
+                                      'compare_questions':[], 'blind':True},
+                                     [blind_unit])
+            except ProviderError as error:
+                # Infrastructure failure is not evidence against the pair: record
+                # it and let the ordinary review stand, rather than rewriting a
+                # valid answer because the provider hiccuped once.
+                store.event(doc['id'], 'blind_check_unavailable',
+                            {'run_id':run_id,'candidate_id':candidate['candidate_id'],'code':error.code})
+                return None
+            checks = result.get('checks') if isinstance(result,dict) else None
+            item = checks[0] if isinstance(checks,list) and checks else {}
+            consistent = item.get('consistent') if isinstance(item,dict) else None
+            if type(consistent) is not bool:
+                store.event(doc['id'], 'blind_check_invalid',
+                            {'run_id':run_id,'candidate_id':candidate['candidate_id']})
+                return None
+            return {'consistent':consistent, 'note':str(item.get('note') or '')[:80],
+                    'answer':str(result.get('answer') or '')[:200]}
+
         def review_candidates(candidates, all_units, compare, *, repairing=False):
             if len(candidates)>3:
                 for start in range(0,len(candidates),3):
@@ -928,7 +1033,17 @@ class Worker:
             for candidate in candidates:
                 returned = next((c for c in checks if isinstance(c,dict) and c.get('candidate_id')==candidate['candidate_id']), {})
                 check = {k:returned.get(k) for k in CHECKS+BILINGUAL_CHECKS+['note']}
-                passed = all(check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS) and isinstance(check.get('note'),str) and bool(check['note'])
+                blind = blind_check(candidate, group)
+                if blind is not None:
+                    check['blind'] = blind
+                # A figure answer the image alone cannot support is not a visual
+                # knowledge point, whatever the review model concluded.
+                passed = (all(check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
+                          and isinstance(check.get('note'),str) and bool(check['note'])
+                          and blind_passes(blind))
+                if blind is not None and blind.get('consistent') is False:
+                    check['note'] = '；'.join([str(check.get('note','')),
+                        '仅凭图像无法印证：'+str(blind.get('note') or '')])
                 if passed and not repairing:
                     # AND of two independent review channels; the skeptic vote
                     # only runs for first-vote survivors, so the extra cost is bounded.
@@ -948,6 +1063,8 @@ class Worker:
                         # passed first vote; the first review remains the recorded one.
                         store.event(doc['id'], 'skeptic_review_unavailable', {'run_id':run_id,'candidate_id':candidate['candidate_id']})
                 flags = list(dict.fromkeys([flag for v in candidate['versions'] for flag in quality_flags(v['qa'])]+review_note_flags(check.get('note',''))))
+                if blind is not None and blind.get('consistent') is False:
+                    flags.append('盲答校验未通过：仅凭图像无法核实该答案，需改问图中可确认的内容。')
                 if duplicates:
                     zh = next((v['qa']['input'] for v in candidate['versions'] if v['qa']['language']=='zh'), None)
                     similarity = duplicates.get(zh) if zh else None
@@ -1135,13 +1252,19 @@ class Worker:
             if not doc['units']:
                 from .corpus import prepared_units
                 prepared=prepared_units(store,doc['id'])
-                if prepared:
+                if prepared and reusable_prepared_units(prepared[0], doc, config):
                     units,pages=prepared
                     doc=dict(doc,units=units,pages=pages)
                     store.update_document(doc['id'],units=units,pages=pages)
                     with store.connect() as db:
                         version=db.execute('SELECT id,version_hash FROM corpus_versions WHERE document_id=? ORDER BY created DESC,id DESC LIMIT 1',(doc['id'],)).fetchone()
                         db.execute('INSERT OR IGNORE INTO qa_corpus_inputs VALUES(?,?,?,?)',(doc['id'],version['id'],version['version_hash'],time.time()))
+                elif prepared:
+                    # Keep the corpus version as its own audit record; QA needs
+                    # real figure crops, so it parses the PDF again below.
+                    store.event(doc['id'], 'corpus_units_rejected_for_qa',
+                                {'units': len(prepared[0]),
+                                 'reason': '归档证据只有整页图像，QA需要MinerU裁图'})
             if doc['units']:
                 units, pages = doc['units'], doc['pages']
                 expanded = text_alternatives(units)
