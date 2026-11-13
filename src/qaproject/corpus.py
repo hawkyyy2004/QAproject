@@ -119,6 +119,13 @@ def enqueue(store, doc_id, kind='paper', *, title='', source_url='', source_labe
         merged = dict(json.loads(job['metadata_json']) if job else {}, **(metadata or {}))
         if pdf_engine not in {None,'configured','native','mineru'}:raise ValueError('无效论文解析方式')
         if pdf_engine:merged['pdf_engine']=pdf_engine
+        # Repair a requested legacy archive by creating a new immutable version.
+        # Never rewrite the old archive or documents.units used by existing QA.
+        if not reprocess and job and job['status']=='completed' and Path(doc['path']).suffix.lower()=='.pdf':
+            prior=db.execute('SELECT units_json FROM corpus_versions WHERE id=?',(job['version_id'],)).fetchone()
+            if prior and any(u.get('evidence_kind')=='pdf_page' and u.get('layout_engine')!='mineru' for u in json.loads(prior[0])):
+                if corpus_processing.configured_engine(store,doc,settings(),merged.get('pdf_engine'))[0]=='mineru':
+                    reprocess=True
         encoded = encode(merged)
         requested = bool(generate_after if reprocess else generate_after or (job and job['generate_after']))
         active = db.execute("SELECT id,status FROM tasks WHERE document_id=? AND initial_stage='corpus' AND status IN ('queued','running') ORDER BY rowid LIMIT 1", (doc_id,)).fetchone()
@@ -343,37 +350,51 @@ def process(worker, task):
                 row = prior
             else: row = None
         else: row = None
+        if row and path.suffix.lower()=='.pdf' and any(
+                u.get('evidence_kind')=='pdf_page' and u.get('layout_engine')!='mineru' for u in row['units']):
+            requested=json.loads(job['metadata_json']).get('pdf_engine')
+            if corpus_processing.configured_engine(store,doc,settings(),requested)[0]=='mineru':row=None
         if row is None:
             metadata=json.loads(job['metadata_json']);processing=metadata.get('processing',{})
             engine='native'
             if path.suffix.lower()=='.pdf':
-                if processing.get('parser_selection'):
+                if processing.get('evidence_policy')==corpus_processing.MINERU_EVIDENCE and processing.get('parser_selection'):
                     engine=processing['parser_selection']['resolved']
-                elif processing.get('structure'):
-                    engine='mineru' if processing['structure']['engine'].startswith('MinerU') else 'native'
                 else:
                     engine,note=corpus_processing.configured_engine(store,doc,settings(),metadata.get('pdf_engine'))
                     processing['parser_selection']=dict(requested=metadata.get('pdf_engine') or 'configured',resolved=engine,note=note)
             checkpoint=json.loads(job['units_json'])
             raw = checkpoint or doc['units']; pages = job['pages'] if checkpoint else doc['pages']
             if metadata.get('reprocess'):raw=json.loads(job['units_json']);pages=job['pages']
+            if engine=='mineru' and processing.get('evidence_policy')!=corpus_processing.MINERU_EVIDENCE:
+                if checkpoint:
+                    metadata.setdefault('superseded_preparations',[]).append(dict(
+                        units=checkpoint,pages=job['pages'],processing=processing,
+                        reason='恢复原QA的MinerU独立插图证据，旧准备结果仅保留审计'))
+                # A checkpoint from the regressed page-shot path must not be
+                # republished as MinerU figure evidence. Historical QA is intact.
+                raw=[];pages=0
+                processing={k:v for k,v in processing.items() if k=='parser_selection'}
             if source['kind']=='web' and path.suffix.lower() in {'.html','.htm'} and not json.loads(job['units_json']):
                 from .corpus_web import prepare
                 raw,processing=prepare(worker,doc,source,path,heartbeat,metadata.get('web_charset'));pages=0
-            if not raw:
+            if not raw and engine!='mineru':
                 with store.connect() as db:
                     knowledge = db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?', (doc['id'],)).fetchone()
                 raw = json.loads(knowledge[0]) if knowledge else []
                 if raw:
                     pages = doc['pages']
-            if not raw and not processing.get('visual_preparation_complete'):
-                config = dict(settings(), pdf_layout='off', asset_namespace='corpus-'+uid(),corpus_visual_only=engine=='mineru')
+            if not raw:
+                config=settings()
+                layout_mode='manifest' if config.get('pdf_layout')=='manifest' and metadata.get('pdf_engine')!='mineru' else 'auto'
+                config = dict(config, pdf_layout=layout_mode if engine=='mineru' else 'off',
+                              asset_namespace='corpus-'+uid(),require_mineru=engine=='mineru',corpus_preparation=True)
                 (raw, pages), wait, seconds = worker.limits.parse(
                     lambda: extract(store, dict(doc, path=str(path)), config, progress=lambda *_:heartbeat(),
                         **({'structure_sink':lambda value:processing.update(structure=value)} if path.suffix.lower()=='.pdf' and engine=='native' else {})),
                     worker.stop, heartbeat)
-                if path.suffix.lower()=='.pdf' and engine=='mineru':
-                    processing['visual_preparation_complete']=True;metadata['processing']=processing
+                if engine=='mineru':
+                    processing['evidence_policy']=corpus_processing.MINERU_EVIDENCE;metadata['processing']=processing
                     with store.connect() as db:
                         db.execute('BEGIN IMMEDIATE');_lease(db,task,worker.name)
                         db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,metadata_json=? WHERE document_id=?',(encode(raw),pages,encode(metadata),doc['id']))
@@ -384,7 +405,6 @@ def process(worker, task):
                 if engine=='mineru':
                     expected=set(range(1,pages+1));actual={p['page'] for p in structure['pages']}
                     if expected!=actual:raise ValueError('MinerU页面不完整，未截断发布。')
-                    raw=corpus_processing.structured_units(doc,structure,raw)
                 processing['structure']=structure
             # Freeze preparation before optional model quality checks. A provider
             # failure must not force another PDF/image preparation on retry.

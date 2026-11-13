@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -301,9 +302,13 @@ def build_manifest(pdf_path, data, target, dpi, tier, content_hash, warning):
                     for page in data.get('pages') or [] for block in page.get('blocks') or [])
     with pymupdf.open(pdf_path) as pdf:
         manifest['pdf']['pages'] = len(pdf)
+        numbers = [p.get('page_idx') for p in data.get('pages') or []]
+        if len(numbers) != len(pdf) or set(numbers) != set(range(len(pdf))):
+            warning('MinerU页面不完整，未截断或改用整页截图')
+            return None
         pdf_chars = sum(len(page.get_text()) for page in pdf)
         if pdf_chars >= 400 and raw_chars < pdf_chars * 0.5:
-            warning(f'MinerU 只识别出 {raw_chars} 字符，PDF 文字层有 {pdf_chars} 字符，保留整页兜底')
+            warning(f'MinerU 只识别出 {raw_chars} 字符，PDF 文字层有 {pdf_chars} 字符，本次版面未通过完整性校验')
             return None
         crops = target / 'crops'
         crops.mkdir(parents=True, exist_ok=True)
@@ -319,15 +324,18 @@ def build_manifest(pdf_path, data, target, dpi, tier, content_hash, warning):
                     continue
                 name = f'page-{number:02d}-{PREFIX[item["kind"]]}-{item["index"]:02d}.png'
                 if not crop(page, item['bbox'], crops / name, dpi):
-                    continue
+                    warning(f'第{number}页独立图块无法保存，未丢弃图片或改用整页截图')
+                    return None
                 block = {'kind': item['kind'], 'bbox': [round(x, 4) for x in item['bbox']],
                          'path': f'crops/{name}'}
                 for key in ('caption', 'html', 'latex'):
                     if item.get(key):
                         block[key] = item[key]
                 entry['blocks'].append(block)
-            if entry['blocks']:
-                manifest['pages'].append(entry)
+            if not entry['blocks'] and (page.get_text().strip() or page.get_images() or page.get_drawings()):
+                warning(f'第{number}页未识别出证据，未当作空白页跳过')
+                return None
+            manifest['pages'].append(entry)
     manifest['chars'] = {'mineru': raw_chars, 'pdf_text_layer': pdf_chars}
     return manifest
 
@@ -343,6 +351,8 @@ def parse_args(argv):
     parser.add_argument('--jobs', type=int, default=1, help='同时解析的文件数，4~6 为安全起点')
     parser.add_argument('--limit', type=int, help='只处理前 N 个文件')
     parser.add_argument('--force', action='store_true', help='已存在的清单也重新解析')
+    parser.add_argument('--rebuild', action='store_true', help='复用原始MinerU结果重建独立插图清单')
+    parser.add_argument('--raw-json', type=Path, help='同一原件已完成的MinerU JSON，仅与单份PDF一起使用')
     return parser.parse_args(argv)
 
 
@@ -368,7 +378,7 @@ def process(pdf, args):
     started = time.time()
     content_hash = sha256_file(pdf)
     target = args.layout_dir / content_hash
-    if (target / 'manifest.json').is_file() and not args.force:
+    if (target / 'manifest.json').is_file() and not args.force and not getattr(args, 'rebuild', False):
         return {'file': pdf.name, 'status': 'skipped'}
     target.mkdir(parents=True, exist_ok=True)
     raw = target / 'mineru.json'
@@ -376,10 +386,15 @@ def process(pdf, args):
     # Chinese Windows locale cannot mangle or crash the captured output.
     env = child_env(dict(os.environ, MINERU_MODEL_SOURCE=os.environ.get('MINERU_MODEL_SOURCE', 'modelscope')))
     worker = ROOT / 'scripts/mineru_parse_worker.py'
-    run = subprocess.run([args.mineru_python, str(worker), str(pdf), str(raw), args.tier],
-                         capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
-    if run.returncode:
-        return {'file': pdf.name, 'status': 'failed', 'error': (run.stderr or run.stdout)[-400:]}
+    prior = getattr(args, 'raw_json', None)
+    if not raw.is_file() and prior and prior.is_file():
+        shutil.copyfile(prior, raw)
+    if args.force or not raw.is_file():
+        run = subprocess.run([args.mineru_python, str(worker), str(pdf), str(raw), args.tier],
+                             capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+        if run.returncode:
+            raw.unlink(missing_ok=True)
+            return {'file': pdf.name, 'status': 'failed', 'error': (run.stderr or run.stdout)[-400:]}
     warnings = []
     manifest = build_manifest(pdf, json.loads(raw.read_text(encoding='utf-8')), target,
                               args.dpi, args.tier, content_hash, warnings.append)
@@ -402,16 +417,21 @@ def main(argv=None):
     files = collect(args)
     if not files:
         raise SystemExit('没有找到 PDF；请给出文件、目录或 --list 路径清单。')
-    try:
-        check = subprocess.run([args.mineru_python, '-c', 'import mineru'],
-                               capture_output=True, text=True, encoding='utf-8', errors='replace',
-                               env=child_env())
-    except OSError as error:
-        raise SystemExit(f'{args.mineru_python} 无法执行（{error.strerror or error}），'
-                         f'请运行 scripts/setup_mineru.py 并用 --mineru-python 指向它的解释器。')
-    if check.returncode:
-        raise SystemExit(f'{args.mineru_python} 里没有 MinerU，请先运行 scripts/setup_mineru.py '
-                         f'并用 --mineru-python 指向它的解释器。')
+    if args.raw_json and len(files) != 1:
+        raise SystemExit('--raw-json只能用于同一份PDF，不能跨文件复用。')
+    need_model=args.force or any(not (args.layout_dir/sha256_file(pdf)/'mineru.json').is_file()
+        and not (args.raw_json and args.raw_json.is_file()) for pdf in files)
+    if need_model:
+        try:
+            check = subprocess.run([args.mineru_python, '-c', 'import mineru'],
+                                   capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                   env=child_env())
+        except OSError as error:
+            raise SystemExit(f'{args.mineru_python} 无法执行（{error.strerror or error}），'
+                             f'请运行 scripts/setup_mineru.py 并用 --mineru-python 指向它的解释器。')
+        if check.returncode:
+            raise SystemExit(f'{args.mineru_python} 里没有 MinerU，请先运行 scripts/setup_mineru.py '
+                             f'并用 --mineru-python 指向它的解释器。')
     args.layout_dir.mkdir(parents=True, exist_ok=True)
     print(json.dumps({'files': len(files), 'tier': args.tier, 'dpi': args.dpi,
                       'layout_dir': str(args.layout_dir)}, ensure_ascii=False), flush=True)
@@ -422,7 +442,7 @@ def main(argv=None):
             totals[result['status']] = totals.get(result['status'], 0) + 1
             print(json.dumps(result, ensure_ascii=False), flush=True)
     print(json.dumps(dict(totals, seconds=round(time.time() - started, 1)), ensure_ascii=False))
-    return 0 if not totals['failed'] else 1
+    return 0 if not (totals['failed'] or totals['rejected']) else 1
 
 
 if __name__ == '__main__':

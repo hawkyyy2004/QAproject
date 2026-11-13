@@ -28,3 +28,8 @@ def test_text_only_and_cropped_evidence_are_reused():
 def test_explicit_layout_off_keeps_page_renders():
     doc = {'path': 'a.pdf'}
     assert reusable_prepared_units([unit('pdf_page', True)], doc, {'pdf_layout': 'off'})
+
+
+def test_actual_mineru_scan_evidence_does_not_trigger_a_second_parse():
+    scan=dict(unit('pdf_page', True),layout_engine='mineru')
+    assert reusable_prepared_units([scan], {'path':'scan.pdf'}, {'pdf_layout':'auto'})

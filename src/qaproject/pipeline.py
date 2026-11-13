@@ -489,15 +489,15 @@ def blind_passes(blind):
 def reusable_prepared_units(units, doc, config):
     """Whether corpus-archived evidence can feed QA as it is.
 
-    Corpus archiving parses PDFs with pdf_layout='off', so its images are whole
-    page renders. QA with MinerU enabled must re-parse instead of inheriting
-    them, or every figure question silently degrades to reading page text.
+    New Corpus preparation uses the original MinerU figure pipeline. Keep the
+    guard for historical native page renders; actual MinerU scan blocks are
+    already the original visual evidence and must not force a second parse.
     """
     if Path(doc.get('path') or '').suffix.lower() != '.pdf':
         return True
     if str(config.get('pdf_layout', 'auto')).lower() not in {'auto', 'manifest'}:
         return True
-    return not any(u.get('evidence_kind') == 'pdf_page' for u in units)
+    return not any(u.get('evidence_kind') == 'pdf_page' and u.get('layout_engine') != 'mineru' for u in units)
 
 
 def content_facts(result, group):

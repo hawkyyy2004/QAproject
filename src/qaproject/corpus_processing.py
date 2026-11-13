@@ -5,7 +5,8 @@ from pathlib import Path
 import re
 from urllib.parse import urljoin, urlsplit
 
-REVISION = 'corpus-20261111'
+REVISION = 'corpus-20261113'
+MINERU_EVIDENCE = 'mineru-independent-v1'
 
 
 class Article(HTMLParser):
@@ -136,7 +137,9 @@ def markdown(title, units, structure=None):
                 lines.extend('| '+' | '.join(row)+' |' for row in rows[1:]);lines.append('')
             for u in units:
                 if u['page']==page['page'] and u['image']:
-                    lines.extend([f'![第{u["page"]}页完整原图](images/{Path(u["image"]).name})',''])
+                    label=u.get('caption') or u.get('locator') or f'第{u["page"]}页图片'
+                    label=label.replace('[','').replace(']','').replace('\n',' ')
+                    lines.extend([f'![{label}](images/{Path(u["image"]).name})',''])
     else:
         for u in units:
             if not u['image']:lines.extend([('#'*min(6,u.get('heading_level',0)+1)+' ' if u.get('heading_level') else '')+u['text'],''])
@@ -156,30 +159,21 @@ def source_row(facts, units, url='', title=''):
 
 
 def mineru_structure(store,doc,heartbeat):
-    """Optional local MinerU JSON, without invoking the legacy crop pipeline."""
+    """Reading structure from the same completed MinerU parse used for QA figures."""
     import json
-    import subprocess
     from . import layout
-    from .settings import settings,ROOT
-    from .console import child_env
-    config=settings();block=config.get('mineru') or {}
-    folder=store.root/'corpus/mineru'/doc['content_hash'];folder.mkdir(parents=True,exist_ok=True)
-    target=folder/'result.json'
-    historical=store.root/'layout'/doc['content_hash']/'mineru.json'
-    if not target.is_file() and historical.is_file():target=historical
-    if not target.is_file():
-        python=layout.runner(config)
-        if not python:raise ValueError('未找到可用MinerU；请检查原有解析环境或配置，不会把本次请求冒充为MinerU成功。')
-        heartbeat()
-        try:
-            run= subprocess.run([python,str(ROOT/'scripts/mineru_parse_worker.py'),doc['path'],str(target),str(block.get('tier') or 'basic')],
-                capture_output=True,env=child_env(),timeout=int(block.get('timeout_seconds') or 900))
-        except subprocess.TimeoutExpired:
-            target.unlink(missing_ok=True);raise ValueError('MinerU解析超时；任务可重试，未将不完整结果当作成功。') from None
-        heartbeat()
-        if run.returncode or not target.is_file():
-            target.unlink(missing_ok=True);raise ValueError('MinerU解析失败；保留原件，未静默改用其他解析器。')
-    raw=json.loads(target.read_text(encoding='utf-8'))
+    heartbeat()
+    target=layout.manifest_path(store,doc['content_hash']).parent/'mineru.json'
+    if target.is_file():
+        raw=json.loads(target.read_text(encoding='utf-8'))
+    else:
+        # A complete historical manifest is sufficient; it must not trigger
+        # another model parse merely to produce the Corpus reading document.
+        frozen=layout.load(store,doc['content_hash'],strict=True)
+        if not frozen:raise ValueError('未找到已完成的MinerU证据，请先准备独立插图。')
+        raw={'pages':[{'page_idx':page-1,'blocks':[
+            {'type':b['kind'],'content':b.get('text') or b.get('html') or b.get('latex') or b.get('caption') or '',
+             'bbox':b.get('bbox',[0,0,0,0])} for b in blocks]} for page,blocks in sorted(frozen.items())]}
     def flatten(value):
         if isinstance(value,str):return value
         if isinstance(value,list):return ''.join(flatten(i.get('content','')) for i in value if isinstance(i,dict))
@@ -193,11 +187,11 @@ def mineru_structure(store,doc,heartbeat):
             kind=block.get('type','text')
             if kind in {'equation','interline_equation'}:text='$$\n'+text+'\n$$'
             lines.append(dict(text=text,bbox=block.get('bbox',[0,0,0,0]),
-                              level=1 if kind in {'title','heading'} else 0,kind=kind,margin=False))
+                              level=1 if kind in {'title','heading','doc_title','paragraph_title'} else 0,kind=kind,margin=False))
         pages.append(dict(page=int(page.get('page_idx',0))+1,lines=lines,tables=[]))
     if not pages:raise ValueError('MinerU没有返回可用页面。')
     return dict(engine='MinerU (local)',pages=pages,
-                limitations=['保留完整页图，不裁剪','公式/表格/标题保留MinerU原输出，仍须核对识别质量'])
+                limitations=['沿用原QA的独立插图、表格和公式，不以含图整页截图替代','公式/表格/标题保留MinerU原输出，仍须核对识别质量'])
 
 
 def configured_engine(store,doc,config,requested=None):
@@ -206,23 +200,7 @@ def configured_engine(store,doc,config,requested=None):
     if requested in {'native','mineru'}:return requested,''
     mode=str(config.get('pdf_layout','auto')).lower()
     if mode=='off':return 'native','沿用原有pdf_layout=off配置。'
-    cached=(store.root/'layout'/doc['content_hash']/'mineru.json').is_file() or (store.root/'corpus/mineru'/doc['content_hash']/'result.json').is_file()
+    cached=any(p.is_file() for p in (store.root/'layout'/doc['content_hash']/'manifest.json',
+        store.root/'layout'/doc['content_hash']/'mineru.json',store.root/'corpus/mineru'/doc['content_hash']/'result.json'))
     if cached or (mode=='auto' and layout.runner(config)):return 'mineru','沿用原有MinerU配置或已保存的MinerU结果。'
     return 'native','沿用原有自动/清单模式的原生兜底：本次未找到可用MinerU或匹配清单；不是MinerU解析成功。'
-
-
-def structured_units(doc,structure,images):
-    from .parsers import text_spans
-    from .store import digest
-    result=[dict(u) for u in images if u.get('image')]
-    for page in structure['pages']:
-        n=0
-        for line in page['lines']:
-            if line.get('margin'):continue
-            for start,end in text_spans(line['text']):
-                n+=1;text=line['text'][start:end]
-                u=dict(id=f'{doc["id"]}:mineru:p{page["page"]}:s{n}',text=text,page=page['page'],seg=n,
-                       locator=f'page-{page["page"]:02d}-seg-{n:02d}',image='',asset_id='',
-                       language='zh' if re.search('[\u4e00-\u9fff]',text) else 'en',heading_level=line['level'])
-                u['hash']=digest(u);result.append(u)
-    return result

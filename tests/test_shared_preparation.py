@@ -99,17 +99,15 @@ def test_later_knowledge_request_waits_for_already_pending_corpus(tmp_path):
 
 def test_default_inherits_existing_mineru_policy_and_does_not_extract_native_body(tmp_path,monkeypatch):
     from qaproject import layout
+    from test_layout_manifest import manifest_for
     app=create_app(tmp_path/'data',workers=False);client=TestClient(app);client.headers['x-qa-session']=app.state.session
     with pymupdf.open() as pdf:
         p=pdf.new_page();p.insert_text((40,80),'Native content should not replace MinerU content.')
         raw=pdf.tobytes()
     doc=client.post('/api/imports',files={'files':('sea.pdf',raw)}).json()[0]['id'];store=app.state.stores['live']
     monkeypatch.setattr(layout,'runner',lambda config:'existing-mineru-python')
-    invoked=[]
-    def mineru(*args):
-        invoked.append(1)
-        return dict(engine='MinerU (local)',pages=[dict(page=1,tables=[],lines=[dict(text='MinerU salinity observation 35 PSU.',bbox=[0,0,1,1],level=0,margin=False)])],limitations=[])
-    monkeypatch.setattr(corpus_processing,'mineru_structure',mineru)
+    manifest_for(store,doc,[dict(page=1,blocks=[dict(kind='text',text='MinerU salinity observation 35 PSU.')])])
+    monkeypatch.setattr(layout,'prepare',lambda *a:(_ for _ in ()).throw(AssertionError('Use the existing MinerU manifest')))
     original=pymupdf.Page.get_text
     def get_text(self,option='text',*a,**kw):
         assert option!='text','The native preparer must not generate a second body before MinerU.'
@@ -119,7 +117,7 @@ def test_default_inherits_existing_mineru_policy_and_does_not_extract_native_bod
     try:assert w.run_once()
     finally:w.limits.close()
     version=corpus.verify(store,corpus.listing(store)['items'][0]['id'])
-    assert invoked==[1] and version['manifest']['processing']['parser_selection']['resolved']=='mineru'
+    assert version['manifest']['processing']['parser_selection']['resolved']=='mineru'
     assert any(u['text']=='MinerU salinity observation 35 PSU.' for u in version['units'])
     assert corpus_processing.configured_engine(store,store.document(doc),{'pdf_layout':'off'})[0]=='native'
     assert corpus_processing.configured_engine(store,store.document(doc),{'pdf_layout':'auto'},'native')[0]=='native'

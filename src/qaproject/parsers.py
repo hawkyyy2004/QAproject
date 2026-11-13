@@ -174,18 +174,25 @@ def extract(store, doc, config, progress=None, structure_sink=None):
             # figure/table/formula is its own crop. `manifest` only uses a manifest
             # built ahead of time, `auto` also builds one now, `off` never does.
             mode = str(config.get('pdf_layout', 'auto')).lower()
-            frozen = layout_cache.load(store, doc.get('content_hash')) if mode in {'auto', 'manifest'} else {}
-            if doc.get('layout_note') and (frozen or mode == 'off'):
+            strict = bool(config.get('require_mineru'))
+            note = ''
+            frozen = layout_cache.load(store, doc.get('content_hash'), **({'strict':True} if strict else {})) if mode in {'auto', 'manifest'} else {}
+            report_document = not config.get('corpus_preparation')
+            if report_document and doc.get('layout_note') and (frozen or mode == 'off'):
                 # Crops came from a manifest this time, or layout is switched off on
                 # purpose; either way an earlier failure note no longer applies.
                 store.update_document(doc['id'], layout_note='')
             if not frozen and mode == 'auto':
-                store.update_document(doc['id'], progress='正在按版面拆图，首次约 1 分钟')
+                if report_document: store.update_document(doc['id'], progress='正在按版面拆图，首次约 1 分钟')
                 frozen, note = layout_cache.prepare(store, doc, config)
                 # Keep the reason visible in the file list instead of degrading silently.
-                store.update_document(doc['id'], layout_note=note)
+                if report_document: store.update_document(doc['id'], layout_note=note)
                 store.event(doc['id'], 'layout_prepared',
                             {'mode': 'mineru', 'pages': len(frozen), 'note': note})
+            if strict:
+                if not frozen: raise ValueError('MinerU独立插图准备失败，未改用整页截图。'+note)
+                if set(frozen) != set(range(1,len(pdf)+1)):
+                    raise ValueError('MinerU页面不完整，未截断或改用整页截图。')
             labels = {'figure': '图片', 'table': '表格', 'formula': '公式', 'page': '整页扫描'}
             prefixes = {'figure': 'fig', 'table': 'tbl', 'formula': 'eq', 'page': 'page'}
 
@@ -197,7 +204,7 @@ def extract(store, doc, config, progress=None, structure_sink=None):
                     if kind == 'text':
                         for paragraph in pdf_paragraphs(block['text']):
                             seg += 1
-                            add(paragraph, n, seg, evidence_kind='extracted_text')
+                            add(paragraph, n, seg, evidence_kind='extracted_text', layout_engine='mineru')
                         continue
                     counts[kind] += 1
                     index = counts[kind]
@@ -217,12 +224,12 @@ def extract(store, doc, config, progress=None, structure_sink=None):
                         locator=f'page-{n:02d}-{prefixes[kind]}-{index:02d}',
                         unit_id=f'{doc["id"]}:p{n}:{prefixes[kind]}{index}',
                         evidence_kind='pdf_page' if kind == 'page' else f'pdf_{kind}',
-                        bbox=block.get('bbox'))
+                        bbox=block.get('bbox'), layout_engine='mineru')
                     # Visual units do not consume the paragraph counter.
                     seg_offsets[n] = offset
 
             for n, page in enumerate(pdf, 1):
-                if frozen.get(n):
+                if n in frozen:
                     layout_page(n, frozen[n])
                     if progress and (n % 10 == 0 or n == len(pdf)):
                         progress(n, len(pdf))
@@ -230,7 +237,7 @@ def extract(store, doc, config, progress=None, structure_sink=None):
                 visual = has_full_page_image(page)
                 flags = pymupdf.TEXTFLAGS_TEXT | (0 if visual else pymupdf.TEXT_PRESERVE_IMAGES)
                 textpage = page.get_textpage(flags=flags)
-                text = '' if config.get('corpus_visual_only') else page.get_text('text', sort=True, textpage=textpage).strip()
+                text = page.get_text('text', sort=True, textpage=textpage).strip()
                 if structure_sink is not None:
                     from .corpus_processing import page_structure
                     structure_pages.append(page_structure(page,n,textpage))
@@ -315,7 +322,7 @@ def extract(store, doc, config, progress=None, structure_sink=None):
         pages = 0
     else:
         raise ValueError('支持 PDF、PNG/JPG/WebP、CSV/TSV、netCDF(.nc)、TXT/MD。')
-    if not units and not (suffix=='.pdf' and config.get('corpus_visual_only')):
+    if not units:
         raise ValueError('没有可读取证据')
     for unit in units:
         if unit['image'] and Path(unit['image']).stat().st_size > 5*1024*1024:

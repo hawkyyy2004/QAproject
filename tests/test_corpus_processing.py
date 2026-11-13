@@ -134,7 +134,7 @@ def test_semantic_review_does_not_merge_changed_numbers(tmp_path,monkeypatch):
     finally:w.limits.close()
 
 
-def test_mineru_explicit_structure_keeps_formulas_and_does_not_run_legacy_crops(tmp_path,monkeypatch):
+def test_mineru_explicit_reuses_raw_result_for_structure_and_original_figure_pipeline(tmp_path,monkeypatch):
     import pymupdf
     from qaproject import layout
     store=Store(tmp_path/'live')
@@ -143,20 +143,21 @@ def test_mineru_explicit_structure_keeps_formulas_and_does_not_run_legacy_crops(
         raw=pdf.tobytes()
     doc,_=store.import_file('paper.pdf',raw,'live',task_stage='corpus')
     first=run(store,doc);before=store.document(doc)
-    monkeypatch.setattr(layout,'runner',lambda config:'isolated-test-mineru')
-    def parse(command,**kw):
-        Path(command[3]).write_text(json.dumps({'pages':[{'page_idx':0,'blocks':[
-            {'type':'title','content':'Ocean salinity'}, {'type':'equation','content':'S = m/V'},
-            {'type':'table','content':'<table><tr><td>salinity</td><td>35</td></tr></table>'}]}]}))
-        class Result:returncode=0
-        return Result()
-    monkeypatch.setattr('subprocess.run',parse)
+    cached=store.root/'corpus/mineru'/store.document(doc)['content_hash']/'result.json'
+    cached.parent.mkdir(parents=True)
+    cached.write_text(json.dumps({'pages':[{'page_idx':0,'blocks':[
+        {'type':'doc_title','bbox':[.1,.1,.8,.15],'content':'Ocean salinity'},
+        {'type':'equation','bbox':[.1,.2,.8,.3],'content':'S = m/V'},
+        {'type':'table','bbox':[.1,.4,.8,.6],'content':[{'type':'table_body','content':'<table><tr><td>salinity</td><td>35</td></tr></table>'}]}]}]}))
     corpus.enqueue(store,doc,reprocess=True,pdf_engine='mineru')
     second=corpus.verify(store,run(store,doc))
     assert second['id']!=first and '## Ocean salinity' in second['markdown']
     assert '$$\nS = m/V\n$$' in second['markdown'] and '<table>' in second['markdown']
     assert any('S = m/V' in u['text'] for u in second['units'])
-    assert store.document(doc)==before
+    assert {u['evidence_kind'] for u in second['units'] if u['image']}=={'pdf_formula','pdf_table'}
+    assert second['manifest']['image_count']==2
+    after=store.document(doc)
+    assert {k:v for k,v in after.items() if k!='assets'}=={k:v for k,v in before.items() if k!='assets'}
 
 
 def test_semantic_confirmation_is_cached_but_different_negation_is_never_merged(tmp_path,monkeypatch):

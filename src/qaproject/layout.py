@@ -26,7 +26,7 @@ def manifest_path(store, content_hash):
     return Path(store.root) / 'layout' / str(content_hash) / 'manifest.json'
 
 
-def load(store, content_hash):
+def load(store, content_hash, *, strict=False):
     """Return {page: [blocks]} for a frozen manifest; {} asks for the fallback."""
     if not content_hash:
         return {}
@@ -36,18 +36,23 @@ def load(store, content_hash):
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
+        if strict: raise ValueError('MinerU版面清单不可读取，请重试资料整理。') from None
         return {}
     if data.get('schema') != SCHEMA or data.get('content_hash') != content_hash:
+        if strict: raise ValueError('MinerU版面清单与原件不匹配。')
         return {}
     pages = {}
     for entry in data.get('pages') or []:
         page = entry.get('page')
         if not isinstance(page, int) or page < 1:
+            if strict: raise ValueError('MinerU版面清单页码无效。')
             continue
+        if strict and page in pages: raise ValueError('MinerU版面清单含重复页面。')
         blocks = []
         for block in entry.get('blocks') or []:
             kind = block.get('kind')
             if kind not in KINDS:
+                if strict: raise ValueError('MinerU版面清单含未知证据类型。')
                 continue
             item = dict(block)
             if kind != 'text':
@@ -55,13 +60,18 @@ def load(store, content_hash):
                 crop = crop if crop.is_absolute() else path.parent / crop
                 if not crop.is_file():
                     # A missing crop must not silently degrade into a blank unit.
+                    if strict: raise ValueError('MinerU独立插图文件缺失，未改用整页截图。')
                     continue
                 item['path'] = str(crop)
             if kind == 'text' and not (block.get('text') or '').strip():
                 continue
             blocks.append(item)
-        if blocks:
+        if blocks or strict:
             pages[page] = blocks
+    if strict:
+        total = data.get('pdf', {}).get('pages')
+        if type(total) is not int or total < 1 or set(pages) != set(range(1, total+1)):
+            raise ValueError('MinerU版面清单页面不完整，未截断或改用整页截图。')
     return pages
 
 
@@ -98,18 +108,25 @@ def runner(config):
 def prepare(store, doc, config):
     """Build the manifest for this exact file so parsing can crop instead of page-shot.
 
-    Returns the page map, or {} when MinerU is unavailable or fails; the caller
-    then keeps the previous whole-page behaviour instead of failing the file.
+    Returns the page map, or {} with a reason on failure. The original optional
+    parser may fall back; shared MinerU preparation requires success and fails
+    explicitly instead of substituting a page render.
     """
     block = config.get('mineru') or {}
+    raw = Path(store.root) / 'corpus/mineru' / str(doc['content_hash']) / 'result.json'
+    cached_raw = manifest_path(store,doc['content_hash']).parent/'mineru.json'
+    failure_suffix = '未改用整页截图' if config.get('require_mineru') else '保留整页'
     python = runner(config)
-    if not python:
-        return {}, '未找到可用的 MinerU 解释器，保留整页'
+    if not python and not (raw.is_file() or cached_raw.is_file()):
+        return {}, '未找到可用的 MinerU 解释器，'+failure_suffix
     script = Path(__file__).resolve().parents[2] / 'scripts/mineru_layout.py'
     # The script needs this project's PyMuPDF to crop; only MinerU runs over there.
     command = [sys.executable, str(script), str(doc['path']), '--layout-dir', str(Path(store.root) / 'layout'),
-               '--mineru-python', python, '--tier', str(block.get('tier') or 'basic'),
-               '--dpi', str(int(block.get('dpi') or 200)), '--jobs', '1']
+               '--mineru-python', python or sys.executable, '--tier', str(block.get('tier') or 'basic'),
+               '--dpi', str(int(block.get('dpi') or 200)), '--jobs', '1', '--rebuild']
+    # Earlier Corpus versions stored raw MinerU JSON without figure assets.
+    # Build the original figure manifest from it instead of running MinerU twice.
+    if raw.is_file(): command.extend(['--raw-json', str(raw)])
     try:
         # PYTHONIOENCODING pins the child's pipe to UTF-8 even on a GBK Windows
         # console; otherwise a non-GBK character in its output kills the print.
@@ -117,9 +134,11 @@ def prepare(store, doc, config):
                              errors='replace', env=child_env(),
                              timeout=int(block.get('timeout_seconds') or 900))
     except subprocess.TimeoutExpired:
-        return {}, 'MinerU 超时，保留整页'
-    pages = load(store, doc.get('content_hash'))
+        return {}, 'MinerU 超时，'+failure_suffix
+    if run.returncode:
+        return {}, 'MinerU解析或独立插图准备失败，未生成可用清单'
+    pages = load(store, doc.get('content_hash'), strict=bool(config.get('require_mineru')))
     if pages:
         return pages, ''
     detail = (run.stderr or run.stdout or '').strip().splitlines()
-    return {}, f'MinerU 未生成清单，保留整页：{detail[-1][:200] if detail else "无输出"}'
+    return {}, f'MinerU 未生成清单，{failure_suffix}：{detail[-1][:200] if detail else "无输出"}'

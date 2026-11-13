@@ -181,7 +181,7 @@ def prepare(store, doc, config, heartbeat):
         from .corpus_web import text_units
         return text_units(doc,article(path.read_bytes())),0
     # Reuse the single native parser channel; do not add layout/OCR model calls.
-    return extract(store,dict(doc,path=str(path)),dict(config,pdf_layout='off'),progress=lambda *_:heartbeat())
+    return extract(store,dict(doc,path=str(path)),config,progress=lambda *_:heartbeat())
 
 
 def validate_entry(item, unit, doc, allowed_topics):
