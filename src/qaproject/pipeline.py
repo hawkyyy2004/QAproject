@@ -1,5 +1,6 @@
 import hashlib
 from contextlib import nullcontext
+from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import re
@@ -62,6 +63,138 @@ def review_note_flags(note):
     if re.search(r'超出|未在本|未在该|未提供|未给出|无法核实|不支持|不足以支持|\b(unsupported|not supported|cannot verify|not provided|outside the evidence)\b', str(note), re.I):
         return ['审核说明提到证据不足或超出原文，需人工检查，不能默认通过。']
     return []
+
+
+NUMERIC_FLAG = '答案中的数值未在证据原文找到'
+# Digits inside an identifier belong to the name, not to the measurement:
+# N2, cm^3, KJ12, u4. Full-width digits are folded first so a Chinese answer
+# written with them is compared the same way.
+DIGITS = str.maketrans('０１２３４５６７８９．，⁰¹²³⁴⁵⁶⁷⁸⁹', '0123456789.,0123456789')
+# A letter before the digits makes an identifier (N2, KJ12, u4); a letter after
+# them is usually a unit written without a space (43cm, 4d, 200kg). Commas are
+# separators in this corpus ("412,443,490 nm"), not thousands marks.
+NUMBER_TOKEN = re.compile(r'(?<![\dA-Za-z_.^])(\d+(?:\.\d+)?)(?![\d_])')
+SPACED_DIGITS = re.compile(r'(?<!\d)(\d{1,3}(?:[ \u00a0]\d{1,3}){1,3})(?!\d)')
+# A comma is a list separator here ("412,443,490 nm") but can also be a
+# thousands mark ("1,250 km2"). Both readings are kept; whichever the evidence
+# supports is the one that counts.
+COMMA_GROUPS = re.compile(r'(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d])')
+CHINESE_NUMBER = re.compile(r'[〇零一二两三四五六七八九十百千万亿]{2,}')
+CN_DIGITS = {'〇': 0, '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+             '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+CN_UNITS = {'十': 10, '百': 100, '千': 1000}
+# "6个波长值" counts the list it just gave; the count is derived, not measured.
+COUNTED = re.compile(r'\d+(?:\.\d+)?\s*(?=[个种类项条组篇处次站层台套行列])')
+UNITS = ('mg/dm3', 'mg/dm³', 'μmol', 'umol', 'mmol', 'mol', 'dbar', 'm/s', 'm3', 'm³',
+         'cm3', 'cm³', 'dm3', 'dm³', 'mL', 'ml', 'L', 'kg', 'mg', 'g', 'km', 'cm', 'mm',
+         'nm', 'μm', 'um', 'm', 'min', 'h', 'd', 's', 't', 'K', 'Pa', 'hPa', 'kPa', 'MPa',
+         'W', 'J', 'N', 'Hz', 'dB', '‰', '%', '℃', '°C', '°')
+MEASURED = re.compile(r'^(?:' + '|'.join(re.escape(u) for u in UNITS) + r')(?![A-Za-z])')
+
+
+def numbers_in(text):
+    return [value for value, _ in number_items(text)]
+
+
+def number_items(text):
+    """Each number with the text that follows it, which tells a unit from a count."""
+    values = []
+    text = (text or '').translate(DIGITS)
+    for found in NUMBER_TOKEN.finditer(text):
+        try:
+            values.append((Decimal(found.group(1)), text[found.end():found.end()+10]))
+        except InvalidOperation:
+            continue
+    # Formula OCR spaces digits out ("5 0 \sim 1 0 0 h"), and Chinese prose
+    # writes large counts as words (二万年). Both still name a real quantity.
+    for found in SPACED_DIGITS.finditer(text):
+        try:
+            values.append((Decimal(re.sub(r'[ \u00a0]', '', found.group(1))),
+                           text[found.end():found.end()+10]))
+        except InvalidOperation:
+            continue
+    for found in COMMA_GROUPS.finditer(text):
+        try:
+            values.append((Decimal(found.group(0).replace(',', '')),
+                           text[found.end():found.end()+10]))
+        except InvalidOperation:
+            continue
+    for run in CHINESE_NUMBER.findall(text):
+        value = chinese_number(run)
+        if value is not None:
+            values.append((value, ''))
+    return values
+
+
+def chinese_number(run):
+    """Only runs carrying a scale character; 一 in 一部分 is not a count."""
+    if not set(run) & set(CN_UNITS) and not set(run) & {'万', '亿'}:
+        return None
+    total = section = digit = 0
+    for char in run:
+        if char in CN_DIGITS:
+            digit = CN_DIGITS[char]
+        elif char in CN_UNITS:
+            section += (digit or 1) * CN_UNITS[char]
+            digit = 0
+        elif char in {'万', '亿'}:
+            multiplier = 10000 if char == '万' else 100000000
+            section = (section + digit) * multiplier
+            total += section
+            section = digit = 0
+    return Decimal(total + section + digit)
+
+
+def same_number(left, right):
+    """Equal, the same value at different precision, or a percent/fraction pair."""
+    if left == right:
+        return True
+    if left > 0 and right > 0:
+        if abs(left - right * 100) <= left * Decimal('0.005'):
+            return True
+        if abs(right - left * 100) <= right * Decimal('0.005'):
+            return True
+    # Compare at the coarser of the two precisions: that is where rounding
+    # happens. 1.767 and 1.77 agree at two decimals, 5 and 5.5 never do.
+    exponent = max(left.as_tuple().exponent, right.as_tuple().exponent)
+    if not -6 <= exponent <= 3:
+        return False
+    quantum = Decimal(1).scaleb(exponent)
+    try:
+        # Rounding is the only licence granted: 1.767 may be written 1.77, but
+        # 5 may not stand in for 5.5, because those round to different values.
+        return left.quantize(quantum) == right.quantize(quantum)
+    except InvalidOperation:
+        return False
+
+
+def numeric_flags(versions, unit):
+    """A text answer may only cite numbers the evidence itself contains.
+
+    Image evidence is exempt: a cropped chart legitimately yields readings its
+    caption never spells out, and the blind check already judges those. This is
+    the text-side counterpart, where every legitimate number is in the unit.
+    """
+    if unit.get('image'):
+        return []
+    evidence = numbers_in(unit.get('text') or '')
+    missing = []
+    for version in versions:
+        answer = COUNTED.sub(' ', version['qa']['output'])
+        for value, tail in number_items(answer):
+            # "6 wavelength values" and "2.5D"/"3D" count or name things.
+            # A bare small integer is only a measurement when a unit follows.
+            if value == value.to_integral_value() and 0 <= value <= 12 and not MEASURED.match(tail.strip()):
+                continue
+            if any(same_number(value, known) for known in evidence):
+                continue
+            shown = format(value.normalize(), 'f') if value == value.to_integral_value() else str(value)
+            if shown not in missing:
+                missing.append(shown)
+    if not missing:
+        return []
+    return [f'{NUMERIC_FLAG}：' + '、'.join(missing[:5])
+            + '。请核对是否写入了原文以外的数值，或改用原文可核实的表述。']
 
 
 def finish_review(db, document_id):
@@ -1063,6 +1196,9 @@ class Worker:
                         # passed first vote; the first review remains the recorded one.
                         store.event(doc['id'], 'skeptic_review_unavailable', {'run_id':run_id,'candidate_id':candidate['candidate_id']})
                 flags = list(dict.fromkeys([flag for v in candidate['versions'] for flag in quality_flags(v['qa'])]+review_note_flags(check.get('note',''))))
+                if config.get('numeric_verify', True):
+                    flags.extend(numeric_flags(candidate['versions'],
+                                               next(u for u in group if u['id']==candidate['unit_id'])))
                 if blind is not None and blind.get('consistent') is False:
                     flags.append('盲答校验未通过：仅凭图像无法核实该答案，需改问图中可确认的内容。')
                 if duplicates:
@@ -1109,6 +1245,9 @@ class Worker:
                     previous = versions[0]['review']
                     if (previous.get('local_flags') and all(previous.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
                             and not any(CROSS_DOCUMENT_DUPLICATE_FLAG in str(flag) for flag in previous['local_flags'])
+                            # A number the evidence never states can only be fixed by
+                            # rewriting the answer, not by re-reading the same draft.
+                            and not any(str(flag).startswith(NUMERIC_FLAG) for flag in previous['local_flags'])
                             and not any(quality_flags(c['row']) for c in versions)
                             and not review_note_flags(previous.get('note',''))):
                         # A previous keyword-only veto can be resolved by one semantic review,
@@ -1135,6 +1274,9 @@ class Worker:
                                if c.get('pair_id')!=key and c['status'] not in ('rejected','discarded')]
                     payload = {'units':compact_units([unit]),'topics':[{'name':topic['name'],'unit_ids':[unit['id']]}],
                                'target':1,'existing_questions':compare,
+                               # The rewrite must know which regime it is in: a figure
+                               # answer is judged on the image, a prose answer on its unit.
+                               'evidence_mode':'visual' if unit.get('image') else 'text',
                                'repair':{'pair_id':key,'attempt':attempt+1,
                                          'versions':{c['row']['language']:c['row'] for c in versions},
                                          'review':versions[0]['review']}}

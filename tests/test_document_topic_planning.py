@@ -20,7 +20,8 @@ def test_multibatch_whole_file_topics_share_first_generation_and_keep_call_count
                         lambda: dict(settings(), target_per_document=5))
     store=Store(tmp_path/'live')
     doc_id,_=store.import_file('whole.txt',b'isolated evidence','live')
-    units=[evidence(n,'Synthetic calibrated observation. '*220) for n in range(1,6)]
+    units=[evidence(n,'Synthetic calibrated observation. '*220 + 'Measured temperature was 15 degrees Celsius.')
+           for n in range(1,6)]
     store.update_document(doc_id,units=units)
     calls=[]
     read=[]

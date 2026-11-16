@@ -121,11 +121,11 @@ def test_two_files_overlap_third_queues_and_all_pairs_commit(tmp_path, monkeypat
 @pytest.mark.parametrize('request_limit', [1,2])
 def test_nested_analysis_and_files_share_request_ceiling(tmp_path, monkeypatch, request_limit):
     store = Store(tmp_path/'analysis')
-    docs = [store.import_file(f'{n}.txt', str(n).encode(), 'live')[0] for n in range(2)]
+    docs = [store.import_file(f'{n}.txt', f'合成观测{n}：指标为15。'.encode(), 'live')[0] for n in range(2)]
     for doc in docs:
         units = []
         for n in range(4):
-            u = dict(id=f'{doc}:p{n}:s1', text='温度观测资料。'*1000, image='',asset_id='',
+            u = dict(id=f'{doc}:p{n}:s1', text='温度观测资料。'*1000+'实测温度15摄氏度。', image='',asset_id='',
                      page=n+1,seg=1,locator=f'page-{n+1:02d}-seg-01',language='zh')
             units.append(dict(u,hash=digest(u)))
         store.update_document(doc, units=units)
@@ -287,7 +287,7 @@ def test_stop_after_inflight_call_keeps_cache_and_requeues(tmp_path, monkeypatch
 def test_failure_releases_slots_and_other_file_completes(tmp_path, monkeypatch, limits, failure):
     store = Store(tmp_path/'failure')
     failed,_ = store.import_file('bad.pdf' if failure=='parser' else 'bad.txt',b'bad synthetic evidence','live')
-    good,_ = store.import_file('good.txt',b'good synthetic evidence','live')
+    good,_ = store.import_file('good.txt','good synthetic evidence, measured value 15'.encode(),'live')
     def enter(doc,kind):
         if doc==failed:
             raise ProviderError('模拟超时','timeout',{'seconds':.01})

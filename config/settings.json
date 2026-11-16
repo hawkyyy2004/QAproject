@@ -19,6 +19,7 @@
   "json_mode": true,
   "vision_json_mode": true,
   "blind_verify": true,
+  "numeric_verify": true,
   "analysis_concurrency": 2,
   "document_concurrency": 2,
   "model_request_concurrency": 2,

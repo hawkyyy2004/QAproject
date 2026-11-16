@@ -34,7 +34,8 @@ def mixed(tmp_path, monkeypatch, request):
             image = str(path)
             asset = store.add_asset(doc_id, path, n+1, 'Complete synthetic page')
         text = (f'Figure {n+1}. Synthetic temperature and salinity observations, with calibrated sensors. '
-                'Only the specified location and period are covered. ')*2
+                'Only the specified location and period are covered. ')*2 + \
+               'The measured temperature was 15 degrees Celsius.'
         u = dict(id=f'{doc_id}:p{n+1}:s1',text=text,image=image,asset_id=asset,
                  page=n+1,seg=1,locator=f'page-{n+1:04d}-seg-0001',language='en')
         units.append(dict(u,hash=digest(u)))
