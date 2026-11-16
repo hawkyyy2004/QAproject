@@ -20,6 +20,7 @@
   "vision_json_mode": true,
   "blind_verify": true,
   "numeric_verify": true,
+  "visual_value_verify": true,
   "analysis_concurrency": 2,
   "document_concurrency": 2,
   "layout_concurrency": 2,

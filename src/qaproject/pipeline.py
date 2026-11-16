@@ -65,6 +65,30 @@ def review_note_flags(note):
     return []
 
 
+# The clearest enumeration shapes. Prompt guidance asks for interpretation, but
+# a model that still asks "which parts does the diagram contain" is caught here
+# and sent back for a rewrite instead of reaching the library.
+VISUAL_ENUMERATION = (
+    (re.compile(r'(包含|包括|分为)哪[几些]'), '先列清单'),
+    (re.compile(r'哪[几些](个|种|类|方面|要素|组成部分)'), '列清单'),
+    (re.compile(r'(分别是多少|各是多少|分别是哪)'), '逐项列举'),
+    (re.compile(r'分别(采用|使用|为|是|承担)|各(自)?(是|为|采用)'), '逐项列举'),
+    (re.compile(r'(最大值|最小值|最高值|最低值)(分别)?(是|为)?多少'), '只读极值'),
+)
+VISUAL_FLAG = '图片题问法偏列举或读数，需改问对比、成因、异常解释或判据'
+
+
+def visual_question_flags(versions, unit):
+    """Reject the enumeration shapes a figure question should never open with."""
+    if not unit.get('image'):
+        return []
+    question = next((v['qa']['input'] for v in versions if v['qa'].get('language') == 'zh'), '')
+    reasons = [reason for pattern, reason in VISUAL_ENUMERATION if pattern.search(question)]
+    if not reasons:
+        return []
+    return [f'{VISUAL_FLAG}（{reasons[0]}）。请改成问图中可辨认的差异、转折、异常或判断依据。']
+
+
 NUMERIC_FLAG = '答案中的数值未在证据原文找到'
 # Digits inside an identifier belong to the name, not to the measurement:
 # N2, cm^3, KJ12, u4. Full-width digits are folded first so a Chinese answer
@@ -1196,9 +1220,11 @@ class Worker:
                         # passed first vote; the first review remains the recorded one.
                         store.event(doc['id'], 'skeptic_review_unavailable', {'run_id':run_id,'candidate_id':candidate['candidate_id']})
                 flags = list(dict.fromkeys([flag for v in candidate['versions'] for flag in quality_flags(v['qa'])]+review_note_flags(check.get('note',''))))
+                evidence_unit = next(u for u in group if u['id']==candidate['unit_id'])
                 if config.get('numeric_verify', True):
-                    flags.extend(numeric_flags(candidate['versions'],
-                                               next(u for u in group if u['id']==candidate['unit_id'])))
+                    flags.extend(numeric_flags(candidate['versions'], evidence_unit))
+                if config.get('visual_value_verify', True):
+                    flags.extend(visual_question_flags(candidate['versions'], evidence_unit))
                 if blind is not None and blind.get('consistent') is False:
                     flags.append('盲答校验未通过：仅凭图像无法核实该答案，需改问图中可确认的内容。')
                 if duplicates:
@@ -1248,6 +1274,9 @@ class Worker:
                             # A number the evidence never states can only be fixed by
                             # rewriting the answer, not by re-reading the same draft.
                             and not any(str(flag).startswith(NUMERIC_FLAG) for flag in previous['local_flags'])
+                            # Same for an enumerated figure question: only a rewrite
+                            # changes what is asked.
+                            and not any(str(flag).startswith(VISUAL_FLAG) for flag in previous['local_flags'])
                             and not any(quality_flags(c['row']) for c in versions)
                             and not review_note_flags(previous.get('note',''))):
                         # A previous keyword-only veto can be resolved by one semantic review,
