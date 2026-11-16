@@ -126,7 +126,24 @@ def text_alternatives(units):
 LAYOUT_PLACEHOLDER = 'Figure evidence. Read the actual cropped image; its caption is below.'
 
 
-def extract(store, doc, config, progress=None, structure_sink=None):
+def preheat(store, doc, config):
+    """Build the MinerU manifest outside the single parsing thread.
+
+    The layout step is an external process, so two files can prepare at the same
+    time; PyMuPDF never leaves the parser thread. Returns the same
+    ``(pages, note)`` pair ``extract`` would compute, or ``None`` when this file
+    needs no layout work.
+    """
+    if str(config.get('pdf_layout', 'auto')).lower() != 'auto':
+        return None
+    strict = bool(config.get('require_mineru'))
+    frozen = layout_cache.load(store, doc.get('content_hash'), **({'strict': True} if strict else {}))
+    if frozen:
+        return frozen, ''
+    return layout_cache.prepare(store, doc, config)
+
+
+def extract(store, doc, config, progress=None, structure_sink=None, prepared=None):
     path = Path(doc['path'])
     folder = store.root / 'assets/images' / doc['id']
     namespace=config.get('asset_namespace')
@@ -184,7 +201,9 @@ def extract(store, doc, config, progress=None, structure_sink=None):
                 store.update_document(doc['id'], layout_note='')
             if not frozen and mode == 'auto':
                 if report_document: store.update_document(doc['id'], progress='正在按版面拆图，首次约 1 分钟')
-                frozen, note = layout_cache.prepare(store, doc, config)
+                # A layout already prepared off-thread is reused as-is; running it
+                # twice would pay the MinerU cost again for a known failure.
+                frozen, note = prepared if prepared is not None else layout_cache.prepare(store, doc, config)
                 # Keep the reason visible in the file list instead of degrading silently.
                 if report_document: store.update_document(doc['id'], layout_note=note)
                 store.event(doc['id'], 'layout_prepared',

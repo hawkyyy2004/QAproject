@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .glm import (GLMClient, ProviderError, ANALYZE, BLIND, FACTS, PLAN_AND_GENERATE, GENERATE,
                   REVIEW, REVIEW_SKEPTIC, REPAIR)
-from .parsers import extract, text_alternatives, model_text, text_view_matches
+from .parsers import extract, preheat, text_alternatives, model_text, text_view_matches
 from .semantic import cross_document_duplicate, DedupUnavailable
 from .settings import FIELDS, ROOT, settings, source_ref
 from .store import Store, uid, digest, encode, normalized, classification_catalog, load_json
@@ -1419,8 +1419,17 @@ class Worker:
                     store.task_update(task['id'], self.name, 'parsing')
                     store.update_document(doc['id'], pages=total, progress=f'已解析 {done}/{total} 页')
 
+                # MinerU is the slow part of a first parse and runs as its own
+                # process, so two PDFs prepare their layouts side by side while
+                # PyMuPDF keeps using the one parser thread.
+                prepared = None
+                if Path(doc['path']).suffix.lower() == '.pdf' and str(config.get('pdf_layout', 'auto')).lower() == 'auto':
+                    store.update_document(doc['id'], progress='正在按版面拆图，首次约 1 分钟')
+                    prepared = self.limits.layout(
+                        lambda: preheat(store, doc, config), self.stop,
+                        lambda: store.task_update(task['id'], self.name, 'parsing'))
                 (units, pages), wait_seconds, preparation_seconds = self.limits.parse(
-                    lambda: extract(store, doc, config, progress=parsing_progress), self.stop,
+                    lambda: extract(store, doc, config, progress=parsing_progress, prepared=prepared), self.stop,
                     lambda: store.task_update(task['id'], self.name, 'parsing'))
                 self.limits.check(self.stop)
                 verify_reference(doc,store.root)

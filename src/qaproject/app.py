@@ -86,7 +86,8 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
     search_runner = SearchCoordinator(searches.values())
     library = LibraryIndex(stores['live'],library_root or settings().get('library_root'),busy=search_runner.busy)
     concurrency = execution_config(settings())
-    limits = ExecutionLimits(concurrency['model_request_concurrency'], concurrency['document_concurrency'])
+    limits = ExecutionLimits(concurrency['model_request_concurrency'], concurrency['document_concurrency'],
+                             concurrency['layout_concurrency'])
     runners = [Worker(store, before_process=search_runner.interrupt, limits=limits)
                for store in stores.values() for _ in range(concurrency['document_concurrency'])] if workers else []
     session = secrets.token_urlsafe(24)

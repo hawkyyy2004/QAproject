@@ -22,6 +22,7 @@
   "numeric_verify": true,
   "analysis_concurrency": 2,
   "document_concurrency": 2,
+  "layout_concurrency": 2,
   "model_request_concurrency": 2,
   "runtime_dir": null,
   "library_root": null,

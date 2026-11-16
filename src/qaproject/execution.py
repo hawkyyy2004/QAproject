@@ -11,7 +11,7 @@ class WorkInterrupted(Exception):
 
 def execution_config(config):
     result = {}
-    for key in ('document_concurrency', 'model_request_concurrency'):
+    for key in ('document_concurrency', 'model_request_concurrency', 'layout_concurrency'):
         value = config.get(key, 2)
         if type(value) is not int or not 1 <= value <= 2:
             raise ValueError(f'{key} 必须为1或2，修改后重启生效。')
@@ -20,12 +20,15 @@ def execution_config(config):
 
 
 class ExecutionLimits:
-    def __init__(self, model_requests=2, documents=2):
+    def __init__(self, model_requests=2, documents=2, layouts=2):
         self.documents = threading.BoundedSemaphore(documents)
         self.requests = threading.BoundedSemaphore(model_requests)
         # PyMuPDF is not thread-safe. All application parsing uses one thread,
         # while other files can continue waiting for / consuming model results.
         self.parser = ThreadPoolExecutor(max_workers=1, thread_name_prefix='evidence-parser')
+        # MinerU runs as its own process, so layout preparation is safe to
+        # overlap; it is the slow step that otherwise serialises two files.
+        self.layouts = ThreadPoolExecutor(max_workers=layouts, thread_name_prefix='evidence-layout')
         self.local_embedding = threading.Lock()
         self.claim_lock = threading.Lock()
         self.active_documents = set()
@@ -106,8 +109,31 @@ class ExecutionLimits:
                     pass
             raise
 
+    def layout(self, run, stop, heartbeat):
+        """Prepare a layout on the overlap-safe pool; returns the value only."""
+        self.check(stop)
+        next_renewal = time.perf_counter()
+        future = self.layouts.submit(run)
+        try:
+            while True:
+                try:
+                    return future.result(timeout=.25)
+                except TimeoutError:
+                    if future.done():
+                        return future.result()
+                    self.check(stop)
+                    if time.perf_counter() >= next_renewal:
+                        heartbeat()
+                        next_renewal = time.perf_counter() + 10
+        except BaseException:
+            # A terminated MinerU child keeps writing only its own manifest,
+            # which the next run reuses, so abandoning it is safe here.
+            future.cancel()
+            raise
+
     def close(self):
         self.parser.shutdown(wait=True, cancel_futures=True)
+        self.layouts.shutdown(wait=False, cancel_futures=True)
 
 
 # Direct Worker users (diagnostic scripts/tests) share the same safety bounds.
