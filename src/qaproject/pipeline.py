@@ -77,6 +77,11 @@ VISUAL_ENUMERATION = (
 )
 VISUAL_FLAG = '图片题问法偏列举或读数，需改问对比、成因、异常解释或判据'
 
+# The skeptic review may veto a factual problem. Its opinions about how much a
+# point teaches are advisory: failing on those sent correct answers back for
+# rewriting and ended as discarded drafts.
+SKEPTIC_BLOCKING = ('supported', 'scope_correct', 'independent', 'language_correct', 'translation_consistent')
+
 
 def visual_question_flags(versions, unit):
     """Reject the enumeration shapes a figure question should never open with."""
@@ -1210,11 +1215,19 @@ class Worker:
                         skeptic_checks = skeptic.get('checks', []) if isinstance(skeptic,dict) else []
                         skeptic_returned = next((c for c in skeptic_checks if isinstance(c,dict) and c.get('candidate_id')==candidate['candidate_id']), {})
                         skeptic_check = {k:skeptic_returned.get(k) for k in CHECKS+BILINGUAL_CHECKS}
-                        if not all(skeptic_check.get(k) is True for k in CHECKS+BILINGUAL_CHECKS):
+                        failed = [k for k,v in skeptic_check.items() if v is not True]
+                        check['skeptic'] = skeptic_check
+                        # The skeptic can veto facts. Its objections about how much
+                        # a point teaches (value, novelty, topic fit) are recorded
+                        # but do not send a correct answer back for rewriting;
+                        # the first reviewer already judged those on its own.
+                        blocking = [k for k in failed if k in SKEPTIC_BLOCKING]
+                        if blocking:
                             passed = False
-                            check['skeptic'] = skeptic_check
-                            failed = [k for k,v in skeptic_check.items() if v is not True]
-                            check['note'] = '；'.join([str(check.get('note','')), '怀疑者复核未通过: '+'/'.join(failed)])
+                            check['note'] = '；'.join([str(check.get('note','')), '怀疑者复核未通过: '+'/'.join(blocking)])
+                        elif failed:
+                            check['note'] = '；'.join([str(check.get('note','')),
+                                '怀疑者提示（不阻断）: '+'/'.join(failed)])
                     except (ProviderError, ValueError, KeyError, TypeError):
                         # The skeptic channel failing (network/quota) must not veto a
                         # passed first vote; the first review remains the recorded one.
