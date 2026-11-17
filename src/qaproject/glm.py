@@ -117,12 +117,27 @@ class GLMClient:
         if self.config.get('json_mode') and (not visual or self.config.get('vision_json_mode', False)):
             body['response_format'] = {'type':'json_object'}
         try:
-            with httpx.Client(timeout=self.config['timeout_seconds'], follow_redirects=False) as client:
-                response = client.post(base_url+'/chat/completions', headers={'Authorization': 'Bearer '+key},
-                    json=body)
+            # A connection that never opened cannot have been billed, so it is
+            # retried here. A read timeout may already have been charged and is
+            # still surfaced to the file's own recovery instead.
+            for attempt in range(3):
+                try:
+                    with httpx.Client(timeout=self.config['timeout_seconds'], follow_redirects=False) as client:
+                        response = client.post(base_url+'/chat/completions',
+                            headers={'Authorization': 'Bearer '+key}, json=body)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+                    stats['connect_retries'] = attempt
+                    if attempt == 2:
+                        raise
+                    stats.setdefault('connect_errors', []).append(type(error).__name__)
+                    time.sleep(1 + 2 * attempt)
         except httpx.TimeoutException:
             raise failed('公司接口请求超时；已保留完成批次，重试时继续，费用状态可能未知。', 'timeout') from None
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            # Record the class so a support case can tell a dropped socket from
+            # a refused connection without echoing any request content.
+            stats['error_class'] = type(error).__name__
             raise failed('公司接口网络连接失败；已保留完成批次，重试时继续，费用状态可能未知。', 'network') from None
         stats['http_status'] = response.status_code
         if response.status_code != 200:
