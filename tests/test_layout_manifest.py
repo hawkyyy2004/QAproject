@@ -228,6 +228,33 @@ def test_panels_and_inner_labels_group_into_single_figure():
     assert [item['text'] for item in items if item['kind'] == 'text'] == ['春季融雪后表层水体开始分层。']
 
 
+def test_toc_index_blocks_stay_in_evidence(tmp_path):
+    """MinerU marks TOC pages 'index'; dropping the type rejected every thesis with a TOC."""
+    module = loader()
+    items = module.plan_page([
+        {'type': 'index', 'bbox': [0.05, 0.05, 0.95, 0.6],
+         'content': [{'type': 'text', 'content': '4.2 数据采集 .......................... 34'}]},
+        {'type': 'ref_text', 'bbox': [0.05, 0.65, 0.95, 0.9],
+         'content': [{'type': 'text', 'content': '[1] Wang H. Submarine pipeline detection. 2019.'}]},
+    ])
+    assert [item['kind'] for item in items] == ['text', 'text']
+
+    toc = '4.2 数据采集 .......................... 34'
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=400, height=600)
+        page.insert_text((40, 60), toc, fontsize=11)
+        pdf_path = tmp_path/'toc.pdf'
+        pdf_path.write_bytes(pdf.tobytes())
+    warnings = []
+    manifest = module.build_manifest(pdf_path, {'pages': [{'page_idx': 0, 'blocks': [
+        {'type': 'index', 'bbox': [0.05, 0.05, 0.95, 0.95],
+         'content': [{'type': 'text', 'content': toc}]}]}]},
+        tmp_path/'layout', 200, 'basic', 'hash-toc', warnings.append)
+    assert warnings == []
+    assert [b['kind'] for b in manifest['pages'][0]['blocks']] == ['text']
+    assert '数据采集' in manifest['pages'][0]['blocks'][0]['text']
+
+
 def test_side_by_side_panels_merge_but_two_captioned_figures_do_not():
     module = loader()
     blocks = [

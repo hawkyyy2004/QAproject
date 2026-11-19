@@ -35,7 +35,7 @@ from qaproject.console import child_env, repair_streams
 
 ROOT = Path(__file__).resolve().parents[1]
 VISUAL = {'image', 'chart'}
-TEXT = {'text', 'paragraph_title', 'doc_title'}
+TEXT = {'text', 'paragraph_title', 'doc_title', 'index', 'ref_text'}
 CAPTION = re.compile(r'^\s*(图|表|Figure|Fig\.?|Table)\s*\d', re.I)
 BRACES = re.compile(r'\{\s*([^{}]*?)\s*\}')
 GROUP_GAP = 0.035

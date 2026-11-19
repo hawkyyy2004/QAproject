@@ -161,6 +161,29 @@ def test_frozen_image_copied_isolated_and_old_qa_changes_cannot_corrupt_version(
     with pytest.raises(ValueError): corpus.verify(store, first['id'])
 
 
+def test_version_title_keeps_filename_not_cover_label(store):
+    """A thesis cover label must never replace the filename (regression for 博士学位论文)."""
+    corpus.init_schema(store)
+    doc = imported(store, name='003_深海近海底拖曳体多模态数据融合和运动轨迹预测研究.pdf')
+    raw = [dict(id='u1', text='博士学位论文\n深海近海底拖曳体多模态数据融合和\n运动轨迹预测研究\n',
+                page=1, seg=1, image='', asset_id='', locator='page-0001-text-01')]
+    raw[0]['hash'] = digest({k: v for k, v in raw[0].items() if k != 'hash'})
+    processing = {'structure': {'pages': [{'page': 1, 'tables': [], 'lines': [
+        {'text': '博士学位论文', 'level': 1, 'kind': None, 'margin': False, 'bbox': [0.1, 0.05, 0.9, 0.1]},
+        {'text': '深海近海底拖曳体多模态数据融合和', 'level': 1, 'kind': None, 'margin': False, 'bbox': [0.1, 0.15, 0.9, 0.2]},
+        {'text': '运动轨迹预测研究', 'level': 1, 'kind': None, 'margin': False, 'bbox': [0.1, 0.2, 0.9, 0.25]}]}]}}
+    doc_row = store.document(doc)
+    row, _ = corpus._publish(store, doc_row, corpus._source(store, doc_row), raw, {'count': 1},
+                             lambda: None, processing=processing)
+    assert row['title'] == doc_row['name']
+
+    # A registered web source keeps its own title instead of the filename.
+    corpus.register_source(store, doc, 'web', title='真实的资料标题')
+    source = corpus._source(store, doc_row)
+    row2, _ = corpus._publish(store, doc_row, source, raw, {'count': 1}, lambda: None, processing=processing)
+    assert row2['title'] == '真实的资料标题'
+
+
 def test_reuse_rejects_asset_hash_or_unit_hash_tampering(store, worker):
     doc = imported(store); raw = frozen_image(store, doc)
     Path(raw['image']).write_bytes(b'bad')

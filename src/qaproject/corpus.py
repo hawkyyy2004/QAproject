@@ -279,9 +279,10 @@ def _publish(store, doc, source, raw, pages, heartbeat, processing=None):
     version_id = uid(); folder = _folder(store, version_id)
     folder.mkdir(parents=True, exist_ok=False)
     units = []; images = {}; assets = []
-    first_page=processing.get('structure',{}).get('pages',[{}])[0]
-    inferred=next((line['text'] for line in first_page.get('lines',[]) if line.get('level')==1 and not line.get('margin') and line.get('kind') not in {'equation','table'}),'')
-    title=source['title'] or inferred or doc['name']
+    # The version title must stay stable across re-processing and parse engines.
+    # First-page "title-level" inference once turned a thesis cover label into
+    # the title, so the registered source title or the filename always wins.
+    title=source['title'] or doc['name']
     for u in cleaned:
         heartbeat(); u = dict(u)
         if u['image']:
