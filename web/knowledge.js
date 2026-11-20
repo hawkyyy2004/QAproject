@@ -33,14 +33,15 @@ async function loadKnowledgeJobs(){
 }
 $('#knowledge-jobs-prev').onclick=()=>{knowledgeJobsPage--;loadKnowledgeJobs()};
 $('#knowledge-jobs-next').onclick=()=>{knowledgeJobsPage++;loadKnowledgeJobs()};
-async function openKnowledgeJob(docId,page=1){
+async function openKnowledgeJob(docId,page=1,rejectedPage=1){
   const seq=++detailSeq,expectedMode=mode;
   try{
-    const [job,entries]=await Promise.all([api('/api/knowledge/jobs/'+encodeURIComponent(docId)),api('/api/knowledge?document_id='+encodeURIComponent(docId)+'&page='+page)]);
+    const [job,entries,rejected]=await Promise.all([api('/api/knowledge/jobs/'+encodeURIComponent(docId)),api('/api/knowledge?document_id='+encodeURIComponent(docId)+'&page='+page),api('/api/knowledge/jobs/'+encodeURIComponent(docId)+'/rejected?page='+rejectedPage)]);
     if(seq!==detailSeq||expectedMode!==mode||view!=='files'||processingTab!=='knowledge')return;
     $('#drawer-title').textContent=job.name;
-    $('#drawer-body').innerHTML=`<div class="detail-summary"><strong>${esc(knowledgeJobLabels[job.status]||job.status)}</strong><p>${esc(job.progress||'等待处理')}</p><p>汇总 ${job.approved_count} 个实体 · ${job.fact_count} 条已审核事实 · 未通过 ${job.rejected_count} 条</p>${job.error?`<div class="error-box">${esc(job.error)}</div>`:''}${job.status==='failed'?`<button class="button secondary" data-knowledge-doc="${esc(docId)}">重试整理</button>`:''}</div><div class="detail-section"><h3>知识条目</h3><a class="button secondary" href="/api/originals/${encodeURIComponent(docId)}?mode=${encodeURIComponent(mode)}" target="_blank" rel="noopener">查看原始文件</a></div>${entries.items.map(item=>`<article class="qa-card"><div class="qa-head"><strong>${esc(item.entity_name)}</strong><span class="tag">${esc(knowledgeTypes[item.entity_type])}</span><span class="tag">${esc(item.topic)}</span></div><p>${esc(item.entity_description)}</p><small class="file-meta">积累 ${item.fact_count||1} 条已审核事实</small><button class="button ghost" data-knowledge-entry="${esc(item.id)}">查看原文及审核说明</button></article>`).join('')||'<div class="empty-state">暂无审核通过的条目；处理完成后会显示在这里。</div>'}<div class="table-footer"><span>共 ${entries.total} 条 · 第 ${entries.page} / ${entries.pages} 页</span><div><button class="button ghost" id="job-entries-prev" ${entries.page<=1?'disabled':''}>上一页</button><button class="button ghost" id="job-entries-next" ${entries.page>=entries.pages?'disabled':''}>下一页</button></div></div>`;
-    $('#job-entries-prev').onclick=()=>openKnowledgeJob(docId,entries.page-1);$('#job-entries-next').onclick=()=>openKnowledgeJob(docId,entries.page+1);
+    $('#drawer-body').innerHTML=`<div class="detail-summary"><strong>${esc(knowledgeJobLabels[job.status]||job.status)}</strong><p>${esc(job.progress||'等待处理')}</p><p>汇总 ${job.approved_count} 个实体 · ${job.fact_count} 条已审核事实 · 历史未通过 ${job.rejected_count} 条</p>${job.error?`<div class="error-box">${esc(job.error)}</div>`:''}${job.status==='failed'?`<button class="button secondary" data-knowledge-doc="${esc(docId)}">重试整理</button>`:''}</div><div class="detail-section"><h3>未通过记录（含已修复） · ${rejected.total} 条</h3>${rejected.items.map(r=>`<article class="qa-card"><strong>${esc(r.entity_name)}</strong><p>${esc(r.description)}</p><p class="review-note">${esc(r.reason)} · ${esc(({queued:'等待修复',running:'修复中',retryable:'修复中断，可续跑',approved:'已修复',failed:'修复未通过',rejected:'待处理'})[r.status]||r.status)}</p>${r.history.map(h=>h.error?`<p class="review-note">${esc(h.error)}</p>`:'').join('')}${r.repairable&&r.status!=='approved'&&(!['queued','running'].includes(r.status))&&(r.attempts<2||r.status==='retryable')?`<button class="button ghost" data-knowledge-repair="${esc(r.id)}" data-document="${esc(docId)}" data-expected="${esc(r.expected_hash)}">${r.status==='retryable'?'继续修复':'单独修复并重审'}</button>`:''}</article>`).join('')||'<p>本页无未通过条目。</p>'}<div class="table-footer"><span>第 ${rejected.page} 页</span><button class="button ghost" id="rejected-prev" ${rejectedPage<=1?'disabled':''}>上一页</button><button class="button ghost" id="rejected-next" ${rejectedPage*20>=rejected.total?'disabled':''}>下一页</button></div></div><div class="detail-section"><h3>知识条目</h3><a class="button secondary" href="/api/originals/${encodeURIComponent(docId)}?mode=${encodeURIComponent(mode)}" target="_blank" rel="noopener">查看原始文件</a></div>${entries.items.map(item=>`<article class="qa-card"><div class="qa-head"><strong>${esc(item.entity_name)}</strong><span class="tag">${esc(knowledgeTypes[item.entity_type])}</span><span class="tag">${esc(item.topic)}</span></div><p>${esc(item.entity_description)}</p><small class="file-meta">积累 ${item.fact_count||1} 条已审核事实</small><button class="button ghost" data-knowledge-entry="${esc(item.id)}">查看原文及审核说明</button></article>`).join('')||'<div class="empty-state">暂无审核通过的条目；处理完成后会显示在这里。</div>'}<div class="table-footer"><span>共 ${entries.total} 条 · 第 ${entries.page} / ${entries.pages} 页</span><div><button class="button ghost" id="job-entries-prev" ${entries.page<=1?'disabled':''}>上一页</button><button class="button ghost" id="job-entries-next" ${entries.page>=entries.pages?'disabled':''}>下一页</button></div></div>`;
+    $('#rejected-prev').onclick=()=>openKnowledgeJob(docId,page,rejectedPage-1);$('#rejected-next').onclick=()=>openKnowledgeJob(docId,page,rejectedPage+1);
+    $('#job-entries-prev').onclick=()=>openKnowledgeJob(docId,entries.page-1,rejectedPage);$('#job-entries-next').onclick=()=>openKnowledgeJob(docId,entries.page+1,rejectedPage);
     $('#drawer-overlay').hidden=false;document.body.style.overflow='hidden';$('#drawer-body').scrollTop=0;
   }catch(e){toast(e.message)}
 }
@@ -88,6 +89,13 @@ document.addEventListener('click',async e=>{
     qa.disabled=true;
     try{await api('/api/documents/'+encodeURIComponent(qa.dataset.startQa)+'/qa',{method:'POST'});closeDrawer();setView('files');setProcessingTab('qa');await refresh();toast('已加入原有双语 QA 处理队列。')}
     catch(error){toast(error.message)}finally{qa.disabled=false}
+    return;
+  }
+  const repair=e.target.closest('[data-knowledge-repair]');
+  if(repair){
+    repair.disabled=true;
+    try{await api('/api/knowledge/jobs/'+encodeURIComponent(repair.dataset.document)+'/rejected/'+encodeURIComponent(repair.dataset.knowledgeRepair)+'/retry',{method:'POST',body:JSON.stringify({expected_hash:repair.dataset.expected})});toast('已加入单条修复队列，完成后刷新记录。');openKnowledgeJob(repair.dataset.document)}
+    catch(error){toast(error.message)}finally{repair.disabled=false}
     return;
   }
   const entry=e.target.closest('[data-knowledge-entry]');

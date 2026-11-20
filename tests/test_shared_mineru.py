@@ -188,3 +188,63 @@ def test_knowledge_only_uses_the_same_original_mineru_parser(tmp_path,monkeypatc
     units,pages=knowledge.prepare(store,store.document(doc),settings(),lambda:None)
     assert pages==1 and len([u for u in units if u['image']])==2
     assert all(u['evidence_kind']=='pdf_figure' for u in units if u['image'])
+
+
+def test_reference_only_page_is_processed_and_audited_without_page_render(tmp_path,monkeypatch):
+    module=loader();path=tmp_path/'references.pdf'
+    texts=['Ocean observations show salinity of 35 PSU.','References: Smith, Ocean observations, 2017.',
+           'Later conclusions describe seasonal circulation.']
+    with pymupdf.open() as pdf:
+        for text in texts:pdf.new_page().insert_text((40,80),text)
+        pdf.save(path)
+    store=Store(tmp_path/'data');doc,_=store.import_file(path.name,path.read_bytes(),'live')
+    document=store.document(doc);target=store.root/'layout'/document['content_hash'];target.mkdir(parents=True)
+    data={'pages':[
+        {'page_idx':0,'blocks':[{'type':'text','bbox':[.1,.1,.9,.2],'content':texts[0]}]},
+        {'page_idx':1,'blocks':[{'type':'header','content':'Marine science'},
+            {'type':'page_number','content':'9'}, {'type':'ref_text','content':texts[1]}]},
+        {'page_idx':2,'blocks':[{'type':'text','bbox':[.1,.1,.9,.2],'content':texts[2]}]}]}
+    warnings=[]
+    manifest=module.build_manifest(path,data,target,144,'basic',document['content_hash'],warnings.append)
+    assert manifest and not warnings and len(manifest['pages'])==3
+    page=manifest['pages'][1]
+    assert page['status']=='filtered' and page['blocks']==[]
+    assert any(b['kind']=='ref_text' and b['text']==texts[1] for b in page['filtered_blocks'])
+    (target/'manifest.json').write_text(json.dumps(manifest))
+    (target/'mineru.json').write_text(json.dumps(data))
+    monkeypatch.setattr(pymupdf.Page,'get_pixmap',lambda *a,**kw:pytest.fail('A filtered reference page must not become a page shot'))
+    for strict in (False,True):
+        units,pages=extract(store,document,dict(settings(),require_mineru=strict))
+        assert pages==3 and {u['page'] for u in units}=={1,3}
+        assert texts[2] in [u['text'] for u in units]
+    structure=corpus_processing.mineru_structure(store,document,lambda:None)
+    assert all(line['margin'] for line in structure['pages'][1]['lines'])
+    assert texts[1] not in corpus_processing.markdown('references',units,structure)
+
+
+@pytest.mark.parametrize('blocks',[[],[{'type':'unknown','content':'Unrecognized scientific content.'}]])
+def test_present_but_unrecognized_page_still_fails(tmp_path,blocks):
+    module=loader();path=tmp_path/'unrecognized.pdf'
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40,80),'Real scientific content must not be silently dropped.')
+        pdf.save(path)
+    warnings=[]
+    assert module.build_manifest(path,{'pages':[{'page_idx':0,'blocks':blocks}]},tmp_path,144,'basic',module.sha256_file(path),warnings.append) is None
+    assert warnings==['第1页未识别出证据，未当作空白页跳过']
+
+
+def test_blocked_qa_shows_concrete_preparation_failure(tmp_path,monkeypatch):
+    store=Store(tmp_path/'data');doc,_=store.import_file('figures.pdf',graphics_pdf(),'live',task_stage='corpus')
+    monkeypatch.setattr(layout,'runner',lambda config:'isolated-mineru')
+    monkeypatch.setattr(layout,'prepare',lambda *a:({},'MinerU第9页未识别出可用证据，请检查该页解析结果。'))
+    parent=corpus.enqueue(store,doc)['task_id'];store.ensure_qa_task(doc,after_task_id=parent)
+    worker=Worker(store,limits=ExecutionLimits())
+    try:
+        assert worker.run_once()
+        assert '第9页' in store.document(doc)['progress']
+        assert '后续任务等待重试' in store.document(doc)['progress']
+        assert store.claim('downstream') is None
+        with store.connect() as db:
+            error=json.loads(db.execute("SELECT detail FROM events WHERE kind='corpus_failed'").fetchone()[0])
+        assert error['stage']=='corpus_layout'
+    finally:worker.limits.close()

@@ -45,6 +45,11 @@ def processing_stage(selected):
 from . import knowledge
 
 
+class KnowledgeRepairBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    expected_hash: str = Field(min_length=64,max_length=64)
+
+
 class CommitBody(BaseModel):
     reviewed: bool
     expected_hash: str
@@ -378,6 +383,21 @@ def create_app(runtime=None, seed=False, workers=True, library_root=None):
         result=knowledge.jobs(workspace(mode),document_id=doc_id)
         if not result['items']:raise HTTPException(404,'知识条目处理记录不存在')
         return result['items'][0]
+
+    @app.get('/api/knowledge/jobs/{doc_id}/rejected')
+    def knowledge_rejected(doc_id,mode='live',page:int=Query(1,ge=1)):
+        from .knowledge_repair import rejections
+        rows=rejections(workspace(mode),doc_id)
+        start=(page-1)*20
+        return dict(total=len(rows),page=page,items=[{k:v for k,v in r.items() if k!='snapshot'} for r in rows[start:start+20]])
+
+    @app.post('/api/knowledge/jobs/{doc_id}/rejected/{rejection_id}/retry')
+    def knowledge_repair(doc_id,rejection_id,body:KnowledgeRepairBody,mode='live'):
+        if mode!='live':raise HTTPException(400,'请在真实资料中修复知识条目')
+        from .knowledge_repair import enqueue_repair
+        try:return enqueue_repair(workspace(mode),doc_id,rejection_id,body.expected_hash)
+        except ValueError as error:
+            raise HTTPException(409 if '变更' in str(error) else 400,str(error)) from None
 
     @app.post('/api/documents/{doc_id}/knowledge')
     def knowledge_extract(doc_id,mode='live'):

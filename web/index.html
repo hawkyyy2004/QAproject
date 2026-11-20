@@ -9,7 +9,7 @@
   <aside class="sidebar">
     <a class="brand" href="#files"><span class="brand-mark">Q<span>↗</span></span><span>QAproject<small>语料处理工作台</small></span></a>
     <div class="nav-caption">工作空间</div>
-    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button><button class="nav-item" data-view="knowledge" aria-label="资料汇总"><span data-icon="topic"></span>资料汇总</button></nav>
+    <nav><button class="nav-item active" data-view="files"><span data-icon="files"></span>文件处理<span class="nav-count" id="nav-count">0</span></button><button class="nav-item" data-view="search"><span data-icon="search"></span>主题模糊搜索</button><button class="nav-item" data-view="knowledge" aria-label="资料汇总"><span data-icon="topic"></span>资料汇总</button><button class="nav-item" data-view="qas"><span data-icon="qa"></span>QA汇总</button></nav>
   </aside>
   <div class="workspace">
     <header class="topbar"><h2 class="module-title" id="crumb">文件处理</h2><button class="connection" id="connection"><span class="green-dot"></span><span id="connection-text">正在连接本地服务</span><span data-icon="chevron"></span></button></header>
@@ -67,7 +67,7 @@
         </section>
         <section id="bilingual-panel" role="tabpanel" aria-labelledby="bilingual-tab">
         <section class="table-card qa-summary-card">
-          <div class="section-toolbar"><div><h2>已入库问答 <span id="qa-total">0</span></h2><p>最新入库在最上方 · 修改通过审核后生效</p></div><div class="toolbar-actions"><button class="button secondary" id="qa-refresh">刷新</button><button class="button primary" id="qa-export"><span data-icon="download"></span>导出原六字段</button></div></div>
+          <div class="section-toolbar"><div><h2>已入库问答 <span id="qa-total">0</span></h2><p>最新入库在最上方 · 修改通过审核后生效</p></div><div class="toolbar-actions"><button class="button secondary" id="qa-refresh">刷新</button><button class="button primary" id="qa-export"><span data-icon="download"></span>导出</button></div></div>
           <div class="table-scroll" tabindex="0" aria-label="QA 六字段表格，可横向滚动"><table class="qa-summary-table"><thead><tr><th>input · 问题</th><th>thinking · 依据摘要</th><th>output · 答案</th><th>source · 来源</th><th>image · 图片</th><th>language</th><th>操作</th></tr></thead><tbody id="qa-rows"></tbody></table></div><div id="qa-empty" class="empty-state" hidden><strong>还没有已入库的问答</strong>在文件处理中完成审核并入库后，问答会显示在这里。</div>
           <div class="table-footer qa-pagination"><span id="qa-page-info" role="status">正在读取已入库问答</span><div><button class="button ghost" id="qa-prev">上一页</button><button class="button ghost" id="qa-next">下一页</button></div></div>
         </section>
@@ -83,7 +83,7 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/app.js?v=20261111-shared-preparation"></script>
   <script src="/library.js?v=20261111-shared-preparation"></script>
-  <script src="/knowledge.js?v=20261111-corpus"></script>
+  <script src="/knowledge.js?v=20261120-knowledge-repair"></script>
   <script src="/corpus.js?v=20261111-inherit-parser"></script>
 </body>
 </html>

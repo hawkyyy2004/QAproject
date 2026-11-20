@@ -187,7 +187,8 @@ def mineru_structure(store,doc,heartbeat):
             kind=block.get('type','text')
             if kind in {'equation','interline_equation'}:text='$$\n'+text+'\n$$'
             lines.append(dict(text=text,bbox=block.get('bbox',[0,0,0,0]),
-                              level=1 if kind in {'title','heading','doc_title','paragraph_title'} else 0,kind=kind,margin=False))
+                              level=1 if kind in {'title','heading','doc_title','paragraph_title'} else 0,kind=kind,
+                              margin=kind in {'header','footer','page_number','ref_text'}))
         pages.append(dict(page=int(page.get('page_idx',0))+1,lines=lines,tables=[]))
     if not pages:raise ValueError('MinerU没有返回可用页面。')
     return dict(engine='MinerU (local)',pages=pages,

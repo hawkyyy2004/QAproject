@@ -66,7 +66,7 @@ def load(store, content_hash, *, strict=False):
             if kind == 'text' and not (block.get('text') or '').strip():
                 continue
             blocks.append(item)
-        if blocks or strict:
+        if blocks or strict or entry.get('status') in {'filtered','blank'}:
             pages[page] = blocks
     if strict:
         total = data.get('pdf', {}).get('pages')
@@ -136,9 +136,30 @@ def prepare(store, doc, config):
     except subprocess.TimeoutExpired:
         return {}, 'MinerU 超时，'+failure_suffix
     if run.returncode:
-        return {}, 'MinerU解析或独立插图准备失败，未生成可用清单'
+        return {}, preparation_error(run.stdout)
     pages = load(store, doc.get('content_hash'), strict=bool(config.get('require_mineru')))
     if pages:
         return pages, ''
     detail = (run.stderr or run.stdout or '').strip().splitlines()
     return {}, f'MinerU 未生成清单，{failure_suffix}：{detail[-1][:200] if detail else "无输出"}'
+
+
+def preparation_error(output):
+    """Expose controlled layout diagnostics; never echo arbitrary child output."""
+    import re
+    for line in str(output or '').splitlines():
+        try:result=json.loads(line)
+        except ValueError:continue
+        if not isinstance(result,dict) or result.get('status')!='rejected':continue
+        warnings=result.get('warnings')
+        if not isinstance(warnings,list):continue
+        for warning in warnings:
+            if not isinstance(warning,str):continue
+            match=re.fullmatch(r'第(\d+)页未识别出证据，未当作空白页跳过',warning)
+            if match:return f'MinerU第{match[1]}页未识别出可用证据，请检查该页解析结果。'
+            match=re.fullmatch(r'第(\d+)页独立图块无法保存，未丢弃图片或改用整页截图',warning)
+            if match:return f'MinerU第{match[1]}页独立图块保存失败，未改用整页截图。'
+            if warning=='MinerU页面不完整，未截断或改用整页截图':return warning
+            match=re.fullmatch(r'MinerU 只识别出 (\d+) 字符，PDF 文字层有 (\d+) 字符，本次版面未通过完整性校验',warning)
+            if match:return f'MinerU正文完整性校验未通过（识别{match[1]}字符，原文文字层{match[2]}字符）。'
+    return 'MinerU解析或独立插图准备失败，未生成可用清单'

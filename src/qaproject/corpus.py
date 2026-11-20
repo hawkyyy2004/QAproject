@@ -386,6 +386,7 @@ def process(worker, task):
                 if raw:
                     pages = doc['pages']
             if not raw:
+                stage='corpus_layout'
                 config=settings()
                 layout_mode='manifest' if config.get('pdf_layout')=='manifest' and metadata.get('pdf_engine')!='mineru' else 'auto'
                 config = dict(config, pdf_layout=layout_mode if engine=='mineru' else 'off',
@@ -402,6 +403,7 @@ def process(worker, task):
             raw=_relocated_images(store,doc['id'],raw)
             if raw:_units_valid(store, doc['id'], raw)
             if path.suffix.lower()=='.pdf' and not processing.get('structure'):
+                stage='corpus_structure'
                 structure,_,_=worker.limits.parse(lambda:corpus_processing.mineru_structure(store,dict(doc,path=str(path)),heartbeat) if engine=='mineru' else corpus_processing.pdf_structure(path,heartbeat),worker.stop,heartbeat)
                 if engine=='mineru':
                     expected=set(range(1,pages+1));actual={p['page'] for p in structure['pages']}
@@ -415,6 +417,7 @@ def process(worker, task):
                 db.execute('UPDATE corpus_jobs SET units_json=?,pages=?,metadata_json=? WHERE document_id=?',
                            (encode(raw),pages,encode(metadata),doc['id']))
             if not processing.get('quality_complete'):
+                stage='corpus_quality'
                 from .corpus_quality import refine
                 raw,decisions=refine(worker,doc,raw,heartbeat)
                 processing['semantic_dedup']=decisions
@@ -450,9 +453,9 @@ def process(worker, task):
                            ('queued' if interrupted else 'failed', message, time.time(), task['document_id'], task['id']))
                 db.execute("UPDATE tasks SET status=?,stage='corpus',worker=NULL,lease_until=0 WHERE id=?", ('queued' if interrupted else 'failed', task['id']))
                 if not interrupted:
-                    db.execute("""UPDATE documents SET progress='资料整理失败，后续任务等待重试' WHERE id=? AND EXISTS(
+                    db.execute("""UPDATE documents SET progress=? WHERE id=? AND EXISTS(
                       SELECT 1 FROM task_dependencies dep JOIN tasks child ON child.id=dep.task_id
-                      WHERE dep.prerequisite_id=? AND child.status='queued')""",(task['document_id'],task['id']))
+                      WHERE dep.prerequisite_id=? AND child.status='queued')""",('资料整理失败：'+message.rstrip('。')+'；后续任务等待重试',task['document_id'],task['id']))
             store.event(task['document_id'], 'corpus_failed', dict(stage=stage, error_type=type(error).__name__,
                         seconds=round(time.perf_counter()-started,3), finish_reason='interrupted' if interrupted else 'incomplete'))
         except ValueError: pass

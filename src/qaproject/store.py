@@ -171,6 +171,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS knowledge_batches(
               document_id TEXT REFERENCES documents(id), signature TEXT, result TEXT NOT NULL,
               PRIMARY KEY(document_id,signature));
+            CREATE TABLE IF NOT EXISTS knowledge_repairs(
+              id TEXT PRIMARY KEY, rejection_id TEXT NOT NULL, document_id TEXT NOT NULL REFERENCES documents(id),
+              task_id TEXT NOT NULL UNIQUE, snapshot TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
+              status TEXT NOT NULL, generated TEXT NOT NULL DEFAULT '', review TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '', created REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS knowledge_repair_lookup ON knowledge_repairs(document_id,rejection_id,created);
             CREATE INDEX IF NOT EXISTS tasks_state ON tasks(status,lease_until);
             CREATE INDEX IF NOT EXISTS tasks_document_state ON tasks(document_id,status);
             CREATE INDEX IF NOT EXISTS topic_docs ON document_topics(topic_id);

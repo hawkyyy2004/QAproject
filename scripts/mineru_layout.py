@@ -36,6 +36,8 @@ from qaproject.console import child_env, repair_streams
 ROOT = Path(__file__).resolve().parents[1]
 VISUAL = {'image', 'chart'}
 TEXT = {'text', 'paragraph_title', 'doc_title', 'index', 'ref_text'}
+# Keep peripheral classification metadata for diagnostics and legacy checks.
+FILTERED = {'header', 'footer', 'page_number', 'ref_text'}
 CAPTION = re.compile(r'^\s*(图|表|Figure|Fig\.?|Table)\s*\d', re.I)
 BRACES = re.compile(r'\{\s*([^{}]*?)\s*\}')
 GROUP_GAP = 0.035
@@ -218,7 +220,10 @@ def plan_page(blocks):
     visuals = [b for b in blocks if b.get('type') in VISUAL]
     equations = [b for b in blocks if b.get('type') == 'equation']
     tables = [b for b in blocks if b.get('type') == 'table']
-    texts = [b for b in blocks if b.get('type') in TEXT and len(block_text(b)) >= 2]
+    # Coordinate-free peripheral records remain diagnostic-only; positioned
+    # index/reference blocks keep the upstream text-evidence behaviour.
+    texts = [b for b in blocks if b.get('type') in TEXT and len(block_text(b)) >= 2
+             and (b.get('type') not in FILTERED or b.get('bbox'))]
     captions, claimed = assign_captions(visuals + tables, texts)
     for block in visuals + tables:
         block['_caption'] = captions.get(id(block), '')
@@ -318,7 +323,11 @@ def build_manifest(pdf_path, data, target, dpi, tier, content_hash, warning):
                 continue
             page = pdf[number - 1]
             entry = {'page': number, 'blocks': []}
-            for item in plan_page(page_data.get('blocks') or []):
+            blocks = page_data.get('blocks') or []
+            filtered = [dict(kind=b['type'],text=block_text(b),bbox=b.get('bbox'))
+                        for b in blocks if b.get('type') in FILTERED]
+            if filtered: entry['filtered_blocks'] = filtered
+            for item in plan_page(blocks):
                 if item['kind'] == 'text':
                     entry['blocks'].append({'kind': 'text', 'text': item['text']})
                     continue
@@ -332,9 +341,14 @@ def build_manifest(pdf_path, data, target, dpi, tier, content_hash, warning):
                     if item.get(key):
                         block[key] = item[key]
                 entry['blocks'].append(block)
-            if not entry['blocks'] and (page.get_text().strip() or page.get_images() or page.get_drawings()):
-                warning(f'第{number}页未识别出证据，未当作空白页跳过')
-                return None
+            if not entry['blocks']:
+                if blocks and all(b.get('type') in FILTERED for b in blocks) and any(block_text(b) for b in blocks):
+                    entry['status'] = 'filtered'
+                elif page.get_text().strip() or page.get_images() or page.get_drawings():
+                    warning(f'第{number}页未识别出证据，未当作空白页跳过')
+                    return None
+                else:
+                    entry['status'] = 'blank'
             manifest['pages'].append(entry)
     manifest['chars'] = {'mineru': raw_chars, 'pdf_text_layer': pdf_chars}
     return manifest

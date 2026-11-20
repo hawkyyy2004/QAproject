@@ -7,6 +7,8 @@ import re
 import time
 from urllib.parse import urlsplit
 
+from .knowledge_read import read_session, cached as read_cached, source_state
+from .knowledge_context import explicit_aliases, canonical_name, entity_context
 from .execution import WorkInterrupted
 from .glm import GLMClient, ProviderError
 from .parsers import extract, text_spans
@@ -65,12 +67,13 @@ existing_entities是本文件已审核条目的名称、类型和解释，仅用
 新证据只重复已有解释时不再输出；有独立价值的新增事实可沿用相同实体名称并明确其条件，仍仅由本条unit支持，不借用已有解释拼接。
 示例只说明粒度，不是固定分类表；不强求对象、物种或地点数量，没有证据就不生成。
 """
-EXTRACT += ENTITY_STYLE
+EXTRACT += ENTITY_STYLE + '\nexisting_entity_index仅为其他已审核实体的名称/类型索引，不含事实，不作为证据；出现索引同名仍可提取新增事实，由后续审核对照完整已审核解释去重。'
 REVIEW += ENTITY_STYLE + """
 审核同时检查条目是否以明确实体命名、解释是否提供实质知识，以及同一单元是否将同一实体拆成重复条目。
 名称是论文标题式任务或泛泛的“优势/研究结果”且未标识独立实体，language_correct=false。
 解释只有“被研究/有影响”等空泛陈述，或仅凭标题推断知识，supported=false。
 已列existing_entities的同一实体同义重复且无新增事实，language_correct=false；不同实体不得仅因相似就拒绝。
+original_name如有值是规范化前原提取名称；规范名由程序根据本文件明示且唯一的别名关系生成，核查事实时仍以本单元原名及原文为准，不因改名补充新事实。
 机构不得硬套Instrument，数据不得硬套Substance；八类无法合理容纳的实体应type_correct=false，不为增加数量强行分类。
 """
 
@@ -257,6 +260,12 @@ def process(worker,task):
                 if error.code=='json' and attempt<1: continue
                 raise
     try:
+        from .knowledge_repair import process_repair
+        with store.connect() as db:
+            repair = db.execute('SELECT * FROM knowledge_repairs WHERE task_id=?', (task['id'],)).fetchone()
+        if repair:
+            process_repair(worker, task, dict(repair))
+            return
         config=settings();progress('running','准备并冻结文字证据')
         verify_reference(doc,store.root)
         if file_hash(original_path(doc,store.root))!=doc['content_hash']:
@@ -288,6 +297,10 @@ def process(worker,task):
             if group and (len(group)>=6 or chars+len(unit['text'])>16000):groups.append(group);group=[];chars=0
             group.append(unit);chars+=len(unit['text'])
         if group:groups.append(group)
+        aliases=explicit_aliases(texts)
+        if aliases:
+            store.event(doc['id'],'knowledge_explicit_aliases',dict(aliases=aliases,
+                evidence_hash=digest([(u['id'],u['hash']) for u in texts])))
         allowed=[t['name'] for t in doc['topics']]
         catalog=[t['name'] for t in store.topics() if t.get('documents',0)>0]
         for index,group in enumerate(groups,1):
@@ -299,7 +312,8 @@ def process(worker,task):
                 existing_entities=[{k:row[k] for k in ('entity_name','entity_type','entity_description')}
                     for record in db.execute("SELECT DISTINCT json_object('entity_name',json_extract(row_json,'$.entity_name'),'entity_type',json_extract(row_json,'$.entity_type'),'entity_description',json_extract(row_json,'$.entity_description')) FROM knowledge_entries WHERE document_id=? AND status='approved' ORDER BY created,id",(doc['id'],))
                     for row in [json.loads(record[0])]]
-            payload={'existing_entities':existing_entities,'units':[dict(id=u['id'],passages=passages(u)) for u in group],
+            related, identity_index = entity_context(existing_entities,group,aliases=aliases)
+            payload={'existing_entities':related,'existing_entity_index':identity_index,'units':[dict(id=u['id'],passages=passages(u)) for u in group],
                      'existing_topics':catalog,'document_topics':allowed}
             result=call('extract',EXTRACT,payload,group)
             if len(result['entries'])>12:raise ValueError('单批条目超出响应约定，未截断保存。')
@@ -307,6 +321,9 @@ def process(worker,task):
             for item in result['entries']:
                 unit=unit_map.get(item.get('unit_id')) if isinstance(item,dict) else None
                 if not unit:raise ValueError('条目引用了未知证据')
+                original_name=item.get('entity_name')
+                if isinstance(original_name,str):
+                    item=dict(item,entity_name=canonical_name(original_name.strip(),aliases,existing_entities,item.get('entity_type')))
                 try:row,topic,quote=validate_entry(item,unit,doc,allowed)
                 except ValueError as error:
                     local_rejected.append(dict(id=digest([doc['id'],item]),unit_id=unit['id'],
@@ -319,10 +336,12 @@ def process(worker,task):
                 if key in seen:continue
                 seen.add(key)
                 entries.append({'id':digest([doc['id'],unit['id'],row]),'unit_id':unit['id'],
-                                'row':row,'topic':topic,'quote':quote,'evidence_hash':unit['hash']})
+                                'row':row,'topic':topic,'quote':quote,'evidence_hash':unit['hash'],
+                                'original_name':original_name})
             stage='reviewing';progress('running',f'审核知识条目 {index}/{len(groups)} 批')
+            related,_ = entity_context(existing_entities,group,[e['row']['entity_name'] for e in entries],aliases)
             checks=call('review',REVIEW,{'units':[dict(id=u['id'],text=u['text']) for u in group],
-                                       'entries':entries,'existing_entities':existing_entities},group)['checks'] if entries else []
+                                       'entries':entries,'existing_entities':related},group)['checks'] if entries else []
             reviews={c.get('id'):c for c in checks if isinstance(c,dict)}
             if len(reviews)!=len(checks) or set(reviews)!={e['id'] for e in entries}:
                 raise ValueError('条目审核响应缺失或重复，未保存本批结果。')
@@ -468,22 +487,28 @@ def listing(store,q='',entity_type='',topic='',status='approved',document_id='',
     return dict(items=[dict(r) for r in rows],total=total,page=page,pages=pages,topics=topics,types=TYPES)
 
 
+@read_session
 def fact_detail(store,entry_id):
-    with store.connect() as db:
-        entry=db.execute('SELECT * FROM knowledge_entries WHERE id=?',(entry_id,)).fetchone()
-        if not entry or entry['status']!='approved':raise ValueError('知识条目不存在或尚未通过审核')
-        entry=dict(entry);job=db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?',(entry['document_id'],)).fetchone()
+    def load_fact():
+        with store.connect() as db:
+            row=db.execute('SELECT * FROM knowledge_entries WHERE id=?',(entry_id,)).fetchone()
+            return dict(row) if row else None
+    saved=read_cached(('fact',entry_id),load_fact)
+    if not saved or saved['status']!='approved':raise ValueError('知识条目不存在或尚未通过审核')
+    entry=dict(saved)
+    def load_units():
+        with store.connect() as db:
+            job=db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?',(entry['document_id'],)).fetchone()
+        return {u['id']:u for u in json.loads(job[0])} if job else {}
+    unit_map=read_cached(('units',entry['document_id']),load_units)
     row=json.loads(entry.pop('row_json'));review=json.loads(entry['review'])
-    unit=next((u for u in json.loads(job[0]) if u['id']==entry['unit_id']),None) if job else None
+    unit=unit_map.get(entry['unit_id'])
     if not unit or unit['hash']!=entry['evidence_hash'] or digest(row)!=entry['row_hash'] or review.get('row_hash')!=entry['row_hash'] or review.get('evidence_hash')!=entry['evidence_hash']:
         raise ValueError('条目证据或审核绑定失效')
     frozen=dict(unit);frozen.pop('hash')
     if digest(frozen)!=unit['hash']:raise ValueError('冻结证据已变更')
-    doc=store.document(entry['document_id'])
-    valid=True
-    try:valid=file_hash(original_path(doc,store.root))==doc['content_hash']
-    except (OSError,ValueError):valid=False
-    actual=str(original_path(doc,store.root)) if valid else doc['path']
+    doc=read_cached(('document',entry['document_id']),lambda:store.document(entry['document_id']))
+    valid,actual=source_state(store,doc)
     return dict(entry,row=row,review=review,locator=unit['locator'],document_name=doc['name'],
                 source_path=actual,registered_source_path=doc['path'],source_relocated=actual!=doc['path'],source_valid=valid)
 
@@ -494,9 +519,18 @@ def entity_members(store,entry_id):
             SELECT entity_id FROM facts WHERE id=?) ORDER BY created,id""",(entry_id,))]
 
 
+@read_session
 def detail(store,entry_id,member_ids=None):
     ids=entity_members(store,entry_id) if member_ids is None else member_ids
     if not ids:raise ValueError('知识条目不存在或尚未通过审核')
+    # Fetch selected members in bounded SQL batches; never load unrelated facts.
+    with store.connect() as db:
+        for offset in range(0,len(ids),500):
+            part=ids[offset:offset+500]
+            rows=db.execute('SELECT * FROM knowledge_entries WHERE id IN ('+','.join('?' for _ in part)+')',part).fetchall()
+            for row in rows:
+                value=dict(row)
+                read_cached(('fact',value['id']),lambda value=value:value)
     facts=[fact_detail(store,i) for i in ids]
     first=facts[0]
     key=lambda e:(e['document_id'],e['row']['entity_type'],e['row']['entity_name'].strip().lower())
@@ -538,6 +572,7 @@ def detail(store,entry_id,member_ids=None):
     return result
 
 
+@read_session
 def export_csv(store,**filters):
     content=io.StringIO(newline='');writer=csv.DictWriter(content,fieldnames=FIELDS);writer.writeheader()
     clause,args=entity_filter(filters.get('q',''),filters.get('entity_type',''),filters.get('topic',''),filters.get('document_id',''))
@@ -550,10 +585,11 @@ def export_csv(store,**filters):
     for entry_id,members in snapshots:
         entry=detail(store,entry_id,json.loads(members))
         if not entry['source_valid']:raise ValueError('存在原件变更或失效的条目，未导出。')
-        writer.writerow(export_row(store,entry))
+        writer.writerow(entry.get('export_row') or export_row(store,entry))
     return content.getvalue().encode('utf-8')
 
 
+@read_session
 def export_row(store,entry):
     """One source-text scope; historical fact and audit rows stay immutable."""
     from . import corpus
@@ -561,14 +597,17 @@ def export_row(store,entry):
     def matches(units):
         binding={u['id']:u['hash'] for u in units}
         return all(binding.get(f['unit_id'])==f['evidence_hash'] for f in entry['evidence'])
-    with store.connect() as db:
-        versions=db.execute('SELECT id,units_json FROM corpus_versions WHERE document_id=? ORDER BY created DESC,id DESC',(entry['document_id'],)).fetchall()
-        job=db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?',(entry['document_id'],)).fetchone()
-    for version in versions:
-        if matches(json.loads(version['units_json'])):
-            current=corpus.verify(store,version['id'])
+    def load_sources():
+        with store.connect() as db:
+            versions=[dict(r) for r in db.execute('SELECT id,units_json FROM corpus_versions WHERE document_id=? ORDER BY created DESC,id DESC',(entry['document_id'],))]
+            job=db.execute('SELECT units FROM knowledge_jobs WHERE document_id=?',(entry['document_id'],)).fetchone()
+        return [(v['id'],json.loads(v['units_json'])) for v in versions],json.loads(job[0]) if job else []
+    versions,job_units=read_cached(('sources',entry['document_id']),load_sources)
+    for version_id,version_units in versions:
+        if matches(version_units):
+            current=read_cached(('version',version_id),lambda:corpus.verify(store,version_id))
             return source_row([entry['row']],current['units'],current['source_url'],current['title'])
-    units=json.loads(job[0]) if job else []
+    units=job_units
     if not matches(units):raise ValueError('知识条目全文来源绑定缺失，未导出不完整正文。')
     if any('entity_hint' in u for u in units):
         # A wiki CSV contains separate source records, not one merged webpage.
