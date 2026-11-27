@@ -96,7 +96,7 @@ def test_parent_reuse_preserves_candidates_sources_reviews_and_old_redirects(set
         assert [tuple(r) for r in db.execute('SELECT * FROM qas ORDER BY id')]==qas_before
     for c in after['candidates']:
         approve(reopened, c['id'], True, c['row_hash'])
-    assert reopened.document(doc_id)['qa_count']==10
+    assert reopened.document(doc_id)['qa_count']==6
 
 
 def test_known_parent_migration_defers_a_live_lease(tmp_path):

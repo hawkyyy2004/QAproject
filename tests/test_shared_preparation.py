@@ -35,7 +35,7 @@ def test_default_qa_archives_first_and_reads_native_pdf_once(tmp_path,monkeypatc
         assert w.run_once()  # QA uses exactly the existing GLM generation/review pipeline.
         assert len(opens)==1
         result=store.document(doc)
-        assert result['bilingual_count']==5 and len(calls)==7,result['error']
+        assert result['bilingual_count']==3 and len(calls)==4,result['error']
         with store.connect() as db:
             assert db.execute('SELECT version_id FROM qa_corpus_inputs WHERE document_id=?',(doc,)).fetchone()[0]==version
     finally:w.limits.close()

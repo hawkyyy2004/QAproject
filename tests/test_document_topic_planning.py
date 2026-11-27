@@ -101,7 +101,7 @@ def test_seventeen_legacy_labels_are_automatically_reclassified_and_do_not_block
     app.state.stores['live']=reopened
     response=TestClient(app).get('/api/export',params={'topic_id':doc['topics'][0]['id']})
     exported=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
-    assert len(exported)==10 and all(row['source'].endswith('|'+old_topic['name']) for row in exported)
+    assert len(exported)==len(original['candidates']) and all(row['source'].endswith('|'+old_topic['name']) for row in exported)
 
 
 def test_new_files_take_priority_over_automatic_historical_reclassification(setup_pipeline):
@@ -125,3 +125,25 @@ def test_reclassification_does_not_repoint_history_after_source_changes(setup_pi
     after=store.document(doc_id)
     assert after['status']=='failed' and '原文件已变更' in after['error']
     assert {c['id']:c['row_hash'] for c in after['candidates']}==hashes
+
+
+def test_empty_opening_batch_does_not_skip_later_scientific_evidence(tmp_path,monkeypatch):
+    store=Store(tmp_path/'live')
+    doc_id,_=store.import_file('later.txt',b'isolated evidence','live')
+    units=[evidence(n,'Synthetic temperature observation. '*400+'Measured temperature was 15 degrees Celsius.') for n in range(3)]
+    store.update_document(doc_id,units=units)
+    visited=[]
+    def call(self,instruction,payload,group=(),**kw):
+        if payload.get('analysis_phase')=='facts':return facts(group),{}
+        if 'document_facts' in payload:
+            visited.extend(u['id'] for u in payload['units'])
+            return dict(summary='完整观测。',topics=[dict(proposal('海洋观测',units[0]),unit_ids=[u['id'] for u in units])],pairs=[],skipped=['首批无独立科学知识。']),{}
+        if 'candidates' in payload:
+            return dict(checks=[dict(candidate_id=c['candidate_id'],note='中英及证据正确。',**{k:True for k in CHECKS+BILINGUAL_CHECKS}) for c in payload['candidates']]),{}
+        visited.extend(u['id'] for u in group)
+        return dict(pairs=[pair(group[0]['id'],len(payload['existing_questions'])//2)],skipped=[]),{}
+    monkeypatch.setattr(GLMClient,'call',call)
+    worker=Worker(store);worker.process(store.claim(worker.name))
+    doc=store.document(doc_id)
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==2,doc['error']
+    assert set(visited)=={u['id'] for u in units} and len(visited)==3

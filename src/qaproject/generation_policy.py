@@ -27,6 +27,15 @@ def document_plan(limits, image_count):
     return dict(limits, text=max(0, limits['target'] - visual), visual=visual)
 
 
+def evidence_limits(config, units):
+    """Length is only a local ceiling hint, never a minimum or quality verdict."""
+    limits = generation_limits(config)
+    chars = sum(len(u.get('text', '').strip()) for u in units if not u.get('image'))
+    ceiling = min(limits['target'], 5 if chars <= 6000 else 10)
+    return dict(limits, target=ceiling, maximum=ceiling,
+                text=min(limits['text'], ceiling), visual=min(limits['visual'], ceiling))
+
+
 def spread(groups):
     """Interleave head and tail so the last pages are reached before quota runs out.
 
@@ -54,13 +63,11 @@ def visual_quota(visual_groups, limits):
 
 
 def generation_phases(text_groups, visual_groups, limits):
+    # Each group gets one opportunity; no text fill pass or quantity-driven revisit.
     if text_groups:
-        yield 'text', min(3, limits['text']) if visual_groups else limits['text'], False, spread(text_groups)
+        yield 'text', limits['text'], False, spread(text_groups)
     if visual_groups:
         yield 'visual', visual_quota(visual_groups, limits), False, spread(visual_groups)
-    if text_groups and visual_groups:
-        # A missing/unusable figure is replaced with text, never a fabricated visual QA.
-        yield 'text', limits['target'], True, spread(text_groups)
 
 
 def modality_counts(candidates):

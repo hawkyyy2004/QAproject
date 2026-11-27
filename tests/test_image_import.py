@@ -80,7 +80,7 @@ def test_import_classify_generate_review_commit_preview_export(tmp_path, monkeyp
     assert Path(unit['image']).read_bytes()==Path(doc['path']).read_bytes()==raw
     # A single photo carries one question; the shortfall is reported, with the
     # full document target and the per-figure rule named.
-    assert '完整目标 10 组' in doc['error'] and '每图 1 组' in doc['error']
+    assert '本文件上限 5 组' in doc['error'] and '每图 1 组' in doc['error']
     preview = client.get('/api/assets/'+unit['asset_id'])
     assert preview.content==raw and preview.headers['content-type']==mime
     result = client.post('/api/documents/'+doc_id+'/approve',headers=headers)

@@ -26,9 +26,9 @@ def test_v07_endpoint_keeps_atomic_review_gates(setup_pipeline,damage):
             db.execute("UPDATE candidates SET row_hash='stale' WHERE id=?",(doc['candidates'][-1]['id'],))
     response = client_for(app).post(f'/api/documents/{doc_id}/approve_all')
     assert response.status_code==(400 if damage else 200)
-    assert store.document(doc_id)['qa_count']==(0 if damage else 10)
+    assert store.document(doc_id)['qa_count']==(0 if damage else 6)
     if not damage:
-        assert response.json()=={'approved':10,'failed':[]}
+        assert response.json()=={'approved':6,'failed':[]}
     assert len(calls)==call_count
 
 
@@ -39,16 +39,16 @@ def test_whole_file_commits_both_languages_once_and_only_selected_file(setup_pip
     call_count = len(calls)
     before = {c['id']:c['row_hash'] for c in doc['candidates']}
     client = client_for(app)
-    assert client.get('/api/documents?summary_only=true').json()[1]['pending_commit_count']==10
+    assert client.get('/api/documents?summary_only=true').json()[1]['pending_commit_count']==6
     response = client.post(f'/api/documents/{doc_id}/approve')
     assert response.status_code==200, response.text
-    assert response.json()=={'approved':True,'committed_count':10,'qa_count':10}
+    assert response.json()=={'approved':True,'committed_count':6,'qa_count':6}
     after = store.document(doc_id)
-    assert after['qa_pair_count']==5 and after['status']=='completed'
+    assert after['qa_pair_count']==3 and after['status']=='completed'
     assert before=={c['id']:c['row_hash'] for c in after['candidates']}
     assert store.document(other_id)['qa_count']==0 and len(calls)==call_count
     assert client.post(f'/api/documents/{doc_id}/approve').json()['committed_count']==0
-    assert store.document(doc_id)['qa_count']==10
+    assert store.document(doc_id)['qa_count']==6
     summary = next(d for d in client.get('/api/documents?summary_only=true').json() if d['id']==doc_id)
     assert summary['pending_commit_count']==0
 
@@ -88,8 +88,8 @@ def test_preserves_prior_commits_and_skips_excluded_pairs(setup_pipeline):
             reject(store,c['id'],c['row_hash'])
     result = client_for(app).post(f'/api/documents/{doc_id}/approve')
     assert result.status_code==200, result.text
-    assert result.json()['committed_count']==6 and result.json()['qa_count']==8
-    assert store.document(doc_id)['qa_pair_count']==4
+    assert result.json()['committed_count']==2 and result.json()['qa_count']==4
+    assert store.document(doc_id)['qa_pair_count']==2
 
 
 def test_one_excluded_translation_cannot_create_partial_pair(setup_pipeline):

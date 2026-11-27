@@ -40,7 +40,7 @@ def test_list_committed_only_newest_first_stable_pages(setup_pipeline):
         db.execute('UPDATE qas SET created=200 WHERE id=?',(doc['candidates'][0]['id'],))
     all_items = client.get('/api/qas').json()['items']
     assert all_items[0]['id']==doc['candidates'][0]['id']
-    pages = [client.get('/api/qas',params={'page':i,'page_size':3}).json() for i in range(1,5)]
+    pages = [client.get('/api/qas',params={'page':i,'page_size':3}).json() for i in range(1,3)]
     assert [v['id'] for p in pages for v in p['items']]==[v['id'] for v in all_items]
     assert client.get('/api/qas?page=999').json()['page']==1
     assert client.get('/api/qas?page=0').status_code==422
@@ -62,7 +62,7 @@ def test_review_edits_pair_once_preserving_ids_dates_exports_and_history(setup_p
     assert len(calls[0][1]['candidates'][0]['versions'])==2
     assert client.get('/api/qas/'+target['id']).json()['revision']['status']=='applied'
     after = snapshot(store)
-    assert len(after)==10 and [(r[0],r[2]) for r in old]==[(r[0],r[2]) for r in after]
+    assert len(after)==6 and [(r[0],r[2]) for r in old]==[(r[0],r[2]) for r in after]
     detail = client.get('/api/qas/'+target['id']).json()
     assert detail['versions'][0]['row']['thinking']==versions[0]['thinking']
     assert '人工复核修改' in client.get('/api/export').content.decode('utf-8-sig')
@@ -166,7 +166,7 @@ def test_historical_single_and_incomplete_pair(setup_pipeline):
     worker.process(store.claim(worker.name,document_id=doc_id))
     detail=client.get('/api/qas/'+target['id']).json()
     assert len(detail['versions'])==1 and detail['revision']['status']=='applied'
-    assert store.document(doc_id)['qa_count']==9
+    assert store.document(doc_id)['qa_count']==5
 
 
 def test_expired_revision_resumes_and_file_tasks_take_priority(setup_pipeline):

@@ -80,8 +80,8 @@ def test_fabricated_number_blocks_the_candidate_and_triggers_rewrite(setup_pipel
     behavior['generation'] = invented_number
     doc = run(setup_pipeline)
     assert doc['status'] == 'waiting_review'
-    assert doc['bilingual_count'] == 5
-    assert not any(NUMERIC_FLAG in str(c['review'].get('local_flags', [])) for c in doc['candidates'])
+    assert doc['bilingual_count'] == 1
+    assert not any(NUMERIC_FLAG in str(c['review'].get('local_flags', [])) for c in doc['candidates'] if c['status']!='discarded')
     # The veto reaches the model: a rewrite is attempted, not a silent re-review.
     assert any('repair' in payload for kind, payload, _ in calls if kind == 'generation')
     assert any('27.4' in str(payload.get('repair', {})) for kind, payload, _ in calls

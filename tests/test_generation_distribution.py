@@ -12,7 +12,7 @@ from qaproject.pipeline import (Worker, CHECKS, BILINGUAL_CHECKS, approve, sanit
                                 strip_unit_ids)
 from qaproject.settings import settings
 from qaproject.store import Store, digest, uid
-from test_bilingual import pair
+from test_bilingual import pair, setup_pipeline
 
 
 @pytest.fixture
@@ -70,7 +70,8 @@ def mixed(tmp_path, monkeypatch, request):
                     return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'{invalid'}}]})
             else:
                 assert not images
-            number = 0 if images and behavior.get('no_figures') else payload['target']
+            number = (0 if (images and behavior.get('no_figures')) or behavior.get('empty_all')
+                      else min(1,payload['target']) if behavior.get('one_only') else payload['target'])
             start = len(payload['existing_questions'])//2
             result=dict(pairs=[pair(payload['units'][0]['id'],start+n) for n in range(number)],
                         skipped=['No usable figures on these pages.'] if not number else [])
@@ -98,53 +99,53 @@ def enqueue(store, doc_id):
         db.execute('INSERT INTO tasks(id,document_id,status) VALUES(?,?,?)',(uid(),doc_id,'queued'))
 
 
-def test_35_units_produce_five_text_and_five_visual_pairs(mixed):
+def test_one_text_batch_and_five_figures_do_not_force_ten_pairs(mixed):
     store, doc_id, units, calls, _ = mixed
     before = digest(units)
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=5,visual=5)
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=5)
     modes = [p['evidence_mode'] for k,p,_ in calls if k=='generation']
-    assert modes.count('visual')==5 and modes.count('text')>=2
+    assert modes.count('visual')==5 and modes.count('text')==1
     assert all(images for k,p,images in calls if k=='generation' and p['evidence_mode']=='visual')
     assert digest(doc['units'])==before
-    assert doc['bilingual_count']==10 and len(doc['candidates'])==20
+    assert doc['bilingual_count']==8 and len(doc['candidates'])==16
     # Coverage must reach the closing pages, not only the opening batches.
     drafted = {c['unit_id'] for c in doc['candidates']}
     pages = [u['page'] for u in units if u['id'] in drafted]
     assert max(pages) > 11, pages
     for c in doc['candidates']:
         approve(store,c['id'],True,c['row_hash'])
-    assert store.document(doc_id)['qa_pair_count']==10
+    assert store.document(doc_id)['qa_pair_count']==8
 
 
-def test_unusable_images_are_bounded_and_text_takes_the_whole_target(mixed):
+def test_unusable_images_do_not_trigger_text_topups(mixed):
     store, doc_id, _, calls, behavior = mixed
     behavior['no_figures']=True
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=0)
     generations = [p for k,p,_ in calls if k=='generation']
     modes = [p['evidence_mode'] for p in generations]
-    assert modes.count('visual')==5 and modes.count('text')>=3
-    assert doc['bilingual_count']==10
-    assert not doc['error']
+    assert modes.count('visual')==5 and modes.count('text')==1
+    assert doc['bilingual_count']==sum(modality_counts(doc['candidates']).values())
+    assert '不补题' in doc['error']
 
 
 @pytest.mark.parametrize('mixed',[3],indirect=True)
 def test_three_figures_take_three_visual_pairs_and_text_keeps_the_rest(mixed):
     store, doc_id, _, calls, _ = mixed
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=7,visual=3)
-    assert doc['bilingual_count']==10
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=3)
+    assert doc['bilingual_count']==sum(modality_counts(doc['candidates']).values())
     visual = [p for k,p,_ in calls if k=='generation' and p['evidence_mode']=='visual']
     assert len(visual)==3
 
 
 @pytest.mark.parametrize('mixed',[0],indirect=True)
-def test_document_without_figures_produces_ten_text_pairs(mixed):
+def test_document_without_figures_visits_text_group_once(mixed):
     store, doc_id, _, calls, _ = mixed
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
-    assert doc['bilingual_count']==10
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=0)
+    assert doc['bilingual_count']==sum(modality_counts(doc['candidates']).values())
     assert all(p['evidence_mode']=='text' for k,p,_ in calls if k=='generation')
 
 
@@ -157,12 +158,12 @@ def test_existing_five_text_pairs_still_leave_room_for_five_visual(mixed,monkeyp
     calls.clear()
     enqueue(store,doc_id)
     doc = process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=5,visual=5)
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=5)
     assert {k for k,_,_ in calls}=={'generation','review'}
     assert all(before[c['id']]==(c['row_hash'],c['evidence_hash'],c['review']) for c in doc['candidates'] if c['id'] in before)
     enqueue(store,doc_id)
     calls.clear()
-    assert process(store,doc_id)['bilingual_count']==10
+    assert process(store,doc_id)['bilingual_count']==8
     assert not calls
 
 
@@ -177,7 +178,7 @@ def test_resume_after_image_timeout_keeps_three_text_pairs_and_sends_images(mixe
     enqueue(store,doc_id)
     calls.clear()
     doc=process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=5,visual=5)
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=5)
     assert all(c['row_hash']==old[c['id']] for c in doc['candidates'] if c['id'] in old)
     assert {k for k,_,_ in calls}=={'generation','review'}
 
@@ -232,12 +233,57 @@ def test_request_local_unit_ids_never_reach_the_reader():
     assert strip_unit_ids('CO2 分压随纬度升高而下降。')=='CO2 分压随纬度升高而下降。'
 
 
-def test_visual_format_failure_is_bounded_and_text_takes_the_quota(mixed):
+def test_visual_format_failure_is_bounded_without_text_topups(mixed):
     store, doc_id, _, calls, behavior = mixed
     behavior['invalid_visual']=True
     doc=process(store,doc_id)
-    assert modality_counts(doc['candidates'])==dict(text=10,visual=0)
+    assert modality_counts(doc['candidates'])==dict(text=3,visual=0)
     assert len([p for k,p,_ in calls if k=='generation' and p['evidence_mode']=='visual'])==2
     with store.connect() as db:
         assert db.execute("SELECT count(*) FROM events WHERE kind='model_error'").fetchone()[0]==2
         assert db.execute("SELECT count(*) FROM events WHERE kind='optional_visual_unavailable'").fetchone()[0]==1
+
+
+def test_zero_pairs_does_not_retry_or_top_up_on_resume(mixed):
+    store,doc_id,_,calls,behavior=mixed
+    behavior['empty_all']=True
+    worker=Worker(store);worker.process(store.claim(worker.name))
+    doc=store.document(doc_id)
+    assert doc['status']=='insufficient' and not doc['candidates']
+    assert sum(k=='generation' and p['evidence_mode']=='text' for k,p,_ in calls)==1
+    enqueue(store,doc_id);calls.clear()
+    worker.process(store.claim(worker.name))
+    assert not calls  # empty successful evidence groups remain exhausted across restart/retry
+
+
+@pytest.mark.parametrize('mixed',[0],indirect=True)
+def test_partial_response_is_not_topped_up(mixed):
+    store,doc_id,_,calls,behavior=mixed
+    behavior['one_only']=True
+    doc=process(store,doc_id)
+    assert doc['bilingual_count']==1
+    assert sum(k=='generation' for k,_,_ in calls)==1
+    enqueue(store,doc_id);calls.clear();process(store,doc_id)
+    assert not calls
+
+
+def test_author_lookup_is_locally_blocked_but_scientific_explanation_survives():
+    from qaproject.pipeline import quality_flags
+    for question in ('这篇论文的作者是谁？','本文由谁撰写？','Who wrote this article?','Who are the authors?'):
+        assert quality_flags(dict(input=question))
+    assert not quality_flags(dict(input='Ekman理论如何解释风驱动海流的垂向变化？'))
+
+
+def test_author_drafts_are_discarded_without_replacement(setup_pipeline):
+    from test_bilingual import run
+    _,store,doc_id,_,calls,behavior,_=setup_pipeline
+    def authors(result,payload,units):
+        for n,q in enumerate(result['pairs']):
+            q['zh']['input']=f'这篇论文的作者{n}是谁？'
+            q['en']['input']=f'Who wrote this article {n}?'
+        return result
+    behavior['generation']=authors
+    doc=run(setup_pipeline)
+    assert doc['status']=='insufficient' and doc['bilingual_count']==0
+    assert all(c['status']=='discarded' for c in doc['candidates'])
+    assert sum(k=='generation' for k,_,_ in calls)==1

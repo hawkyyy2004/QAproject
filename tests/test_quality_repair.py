@@ -62,10 +62,10 @@ def test_all_healthy_generation_precedes_any_repairs(setup_pipeline):
         return result
     behavior['review']=first_fails
     doc=run(setup_pipeline)
-    assert doc['bilingual_count']==5 and all(c['status']=='pending' for c in doc['candidates']),doc['error']
+    assert doc['bilingual_count']==3 and all(c['status']=='pending' for c in doc['candidates']),doc['error']
     kinds=[(k,'repair' in p) for k,p,_ in calls]
     first_repair=kinds.index(('generation',True))
-    assert kinds[:first_repair]==[('analysis',False),('generation',False),('review',False),('review',False),('generation',False),('review',False),('review',False)]
+    assert kinds[:first_repair]==[('analysis',False),('generation',False),('review',False),('review',False)]
 
 
 def test_repair_stays_on_one_unit_and_rejects_broader_evidence(setup_pipeline):

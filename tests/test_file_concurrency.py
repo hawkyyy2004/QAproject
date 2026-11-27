@@ -100,18 +100,18 @@ def test_two_files_overlap_third_queues_and_all_pairs_commit(tmp_path, monkeypat
     for doc_id in docs:
         doc = store.document(doc_id)
         assert doc['status']=='waiting_review', doc['error']
-        assert doc['bilingual_count']==5 and len(doc['candidates'])==10
+        assert doc['bilingual_count']==3 and len(doc['candidates'])==6
         assert all(c['unit_id'].startswith(doc_id+':') for c in doc['candidates'])
         assert all(c['row']['source'].startswith(doc['path']+'|') for c in doc['candidates'])
         result = approve_document(store, doc_id)
-        assert result['committed_count']==10
+        assert result['committed_count']==6
         assert approve_document(store, doc_id)['committed_count']==0
-        assert store.document(doc_id)['qa_pair_count']==5
-        assert [k for d,k in calls if d==doc_id]==['analysis','generation','review','review','generation','review','review']
+        assert store.document(doc_id)['qa_pair_count']==3
+        assert [k for d,k in calls if d==doc_id]==['analysis','generation','review','review']
     app = create_app(store.root.parent/'api',workers=False)
     app.state.stores['live'] = store
     rows = list(csv.DictReader(io.StringIO(TestClient(app).get('/api/export').content.decode('utf-8-sig'))))
-    assert len(rows)==30 and all(list(row)==FIELDS for row in rows)
+    assert len(rows)==18 and all(list(row)==FIELDS for row in rows)
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='model_error'").fetchone()[0]==0
         assert all(json.loads(r[0])['request_wait_seconds']>=0 for r in db.execute("SELECT detail FROM events WHERE kind='model_call'"))
@@ -278,7 +278,7 @@ def test_stop_after_inflight_call_keeps_cache_and_requeues(tmp_path, monkeypatch
     assert cached and not list((store.root/'runs').glob('*.tmp'))
     assert Worker(store,limits=limits).run_once()
     result = store.document(doc)
-    assert result['status']=='waiting_review' and result['bilingual_count']==5, result['error']
+    assert result['status']=='waiting_review' and result['bilingual_count']==3, result['error']
     assert len([1 for _,kind in calls if kind=='analysis'])==1
     assert all((store.root/'runs'/name).read_bytes()==data for name,data in cached.items())
 
@@ -296,7 +296,7 @@ def test_failure_releases_slots_and_other_file_completes(tmp_path, monkeypatch, 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert all(pool.map(lambda w:w.run_once(),workers))
     assert store.document(failed)['status']=='failed'
-    assert store.document(good)['bilingual_count']==5
+    assert store.document(good)['bilingual_count']==3
     with limits.request(threading.Event(),lambda:None):
         pass
     assert not limits.active_documents
@@ -317,7 +317,7 @@ def test_two_pdfs_keep_full_pages_and_distinct_frozen_sources(tmp_path,monkeypat
     for doc in docs:
         result = store.document(doc)
         assert result['status']=='waiting_review', result['error']
-        assert result['pages']==2 and result['bilingual_count']==5
+        assert result['pages']==2 and result['bilingual_count']==3
         assert {u['page'] for u in result['units']}=={1,2}
         assert not result['assets']
         assert all(c['row']['source'].startswith(result['path']+'|page-') for c in result['candidates'])

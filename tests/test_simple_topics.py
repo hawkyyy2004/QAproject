@@ -57,7 +57,7 @@ def test_independent_categories_reuse_across_files_without_extra_requests(tmp_pa
         store.update_document(doc_id,units=sample[0])
         worker.process(store.claim(worker.name,document_id=doc_id))
         doc = store.document(doc_id)
-        assert doc['status']=='waiting_review' and doc['bilingual_count']==5, doc['error']
+        assert doc['status']=='waiting_review' and doc['bilingual_count']==3, doc['error']
         assert {t['name'] for t in doc['topics']}==set(sample[1])
         assert 1<=len(doc['topics'])<=5
         for c in doc['candidates']:
@@ -65,10 +65,10 @@ def test_independent_categories_reuse_across_files_without_extra_requests(tmp_pa
             assert c['unit_id'] in {sample[0][i]['id'] for i in sample[1][name]}
             approve(store,c['id'],True,c['row_hash'])
         docs.append(doc_id)
-    assert calls==['analysis','generation','review','review','generation','review','review']*2
+    assert calls==['analysis','generation','review','review']*2
     assert {d['id'] for d in store.search('电池')[0]['documents']}==set(docs)
     assert {d['id'] for d in store.search('电化学')[0]['documents']}==set(docs)
     assert {d['id'] for d in store.search('聚合物')[0]['documents']}=={docs[0]}
-    assert all(store.document(doc_id)['qa_count']==10 for doc_id in docs)
+    assert all(store.document(doc_id)['qa_count']==6 for doc_id in docs)
     # The user's illustrative biological categories were not added as a fixed catalog.
     assert not {'鱼类','贝类','生物细胞'} & {t['name'] for t in store.topics()}

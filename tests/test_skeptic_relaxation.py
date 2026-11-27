@@ -21,7 +21,7 @@ def test_value_and_novelty_objections_do_not_block(setup_pipeline, monkeypatch):
     override_skeptic(monkeypatch, knowledge_value=False, distinct=False, topic_correct=False)
     doc = run(setup_pipeline)
     assert doc['status'] == 'waiting_review'
-    assert doc['bilingual_count'] == 5
+    assert doc['bilingual_count'] == 3
     assert all(c['status'] == 'pending' for c in doc['candidates'])
     notes = [c['review']['note'] for c in doc['candidates']]
     assert any('怀疑者提示（不阻断）' in note for note in notes)

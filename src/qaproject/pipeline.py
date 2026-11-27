@@ -18,7 +18,7 @@ from .store import Store, uid, digest, encode, normalized, classification_catalo
 from .settings import MAX_DOCUMENT_TOPICS
 from .taxonomy import TopicSelection, visual_topic_support
 from .generation_policy import (document_plan, generation_limits, generation_phases, modality_counts,
-                                visual_priority, visual_quota)
+                                visual_priority, visual_quota, evidence_limits)
 from .execution import DEFAULT_LIMITS, WorkInterrupted
 from .source_files import verify_reference
 from .sqlite_support import sqlite_diagnostics
@@ -56,6 +56,9 @@ def quality_flags(row):
         flags.append('单纯读取图轴/刻度可能缺乏领域知识价值。')
     if re.fullmatch(r'\s*(what (are|were) these( results)?|what does (this figure|the above) show)\s*\?\s*',question,re.I):
         flags.append('英文问题可能依赖未定义指代，需要写明对象和范围。')
+    if (re.search(r'(作者|编委|编者|撰写|署名).*(谁|哪些人|哪位)|谁.*(撰写|编写|署名|作者)|人员名单|编委名单|联系方式',question)
+            or re.search(r'\bwho\s+(?:wrote|authored|edited)\b|\bwho\s+(?:is|are|was|were)\s+(?:the\s+)?(?:authors?|editors?)\b',question,re.I)) and not re.search(r'如何|为什么|机制|原理|解释|\b(?:how|why|mechanism|explain)\b',question,re.I):
+        flags.append('作者/人员名单或出版信息抄录题不具备科学知识价值。')
     return flags
 
 
@@ -235,11 +238,11 @@ def finish_review(db, document_id):
         minimum=config['min_per_document']
         limits=generation_limits(config)
         actual=counts['qa_pair_count'] if counts['pair_count'] else count
-        goal=f'每篇目标 {limits["target"]} 组（图片按文件实际图数分配、每图 1 组，其余为文字）'
-        insufficient = (f'实际入库 {count} 条，完整双语 {counts["qa_pair_count"]} 组，低于下限 {minimum} 组；{goal}，质量优先，不补造。'
-                        if counts['pair_count'] else f'历史单语实际入库 {count} 条，低于下限 {minimum} 条；质量优先，不补造。')
+        goal=f'每篇最多 {limits["target"]} 组（图片按文件实际图数分配、每图 1 组，其余为文字）'
+        insufficient = (f'实际入库 {count} 条，完整双语 {counts["qa_pair_count"]} 组，少于常见范围起点 {minimum} 组；{goal}，质量优先，不补造。'
+                        if counts['pair_count'] else f'历史单语实际入库 {count} 条，少于常见范围起点 {minimum} 条；质量优先，不补造。')
         db.execute('UPDATE documents SET status=?,error=? WHERE id=?',
-                   ('completed' if actual>=minimum else 'completed_under_min',
+                   ('completed' if actual>0 else 'completed_under_min',
                     '' if actual>=minimum else insufficient,document_id))
 
 
@@ -1282,6 +1285,14 @@ class Worker:
                     unit = next(u for u in all_units if u['id']==versions[0]['unit_id'])
                     topic = next(t for t in [*latest['topics'],*latest.get('historical_topics',[])] if t['id']==versions[0]['topic_id'])
                     previous = versions[0]['review']
+                    if any('作者/人员名单或出版信息' in flag for c in versions for flag in quality_flags(c['row'])):
+                        with store.connect() as db:
+                            db.execute('BEGIN IMMEDIATE');assert_lease(db,task['id'],self.name)
+                            db.execute("UPDATE candidates SET status='discarded' WHERE id IN (?,?) AND status='needs_review'",
+                                       tuple(c['id'] for c in versions))
+                            db.execute('INSERT INTO events VALUES(?,?,?,?,?)',(uid(),doc['id'],'nonknowledge_discarded',
+                                       encode({'pair_id':key,'reason':'作者或人员名单抄录，不修订补题'}),time.time()))
+                        break
                     if (previous.get('local_flags') and all(previous.get(k) is True for k in CHECKS+BILINGUAL_CHECKS)
                             and not any(CROSS_DOCUMENT_DUPLICATE_FLAG in str(flag) for flag in previous['local_flags'])
                             # A number the evidence never states can only be fixed by
@@ -1508,7 +1519,7 @@ class Worker:
             text_groups = list(batches(text_units))
             visual_groups = list(batches(sorted(visual_units, key=visual_priority),
                                          max_images=max(1,min(2,int(config.get('generation_max_images',1))))))
-            limits = document_plan(generation_limits(config), sum(len(g) for g in visual_groups))
+            limits = document_plan(evidence_limits(config,units), sum(len(g) for g in visual_groups))
             # A file without usable figures can only reach the text quota; do not
             # keep requesting more batches for pairs that cannot exist.
             attainable = min(limits['target'], limits['text'] + visual_quota(visual_groups, limits))
@@ -1576,6 +1587,9 @@ class Worker:
                         if kind=='generation' and (not isinstance(result.get('pairs'),list) or not isinstance(result.get('skipped'),list)):
                             raise ValueError('整篇主题与首批问答须返回同一个完整JSON对象。')
                         empty_plan = not (result.get('topics') or [])
+                        if (result.get('topics') == [] and isinstance(result.get('summary'),str)
+                                and not doc['candidates']):
+                            raise NoEvidence('未识别到适合生成QA的实质知识，本文件生成0组；不补造主题或问答。')
                         selection = TopicSelection(catalog, units)
                         selection.add(result, topic_units)
                         selected, terms = selection.select()
@@ -1606,7 +1620,7 @@ class Worker:
                             initial_generation = {'group_ids':first_ids,'result':result,'target':payload['target']}
                         break
                     except ValueError as error:
-                        if isinstance(error, ProviderError):
+                        if isinstance(error, (ProviderError, NoEvidence)):
                             raise
                         if attempt == 2:
                             # An empty plan that survives three attempts is a
@@ -1655,20 +1669,28 @@ class Worker:
             count = current['bilingual_count']
             counts = modality_counts(current['candidates'])
             batch_size = max(1,min(3,int(config.get('generation_batch_size',3))))
+            with store.connect() as db:
+                completed_receipts = [json.loads(r[0]) for r in db.execute(
+                    "SELECT detail FROM events WHERE document_id=? AND kind='generation_group_exhausted'",(doc['id'],))]
+                completed_groups = {r['signature'] for r in completed_receipts}
+                completed_visual = len({r['signature'] for r in completed_receipts if r['mode']=='visual'})
+            previously_used = {c['unit_id'] for c in current['candidates']}
             visual_attempts = set()
             visual_unavailable = False
             def generate_batches():
                 nonlocal count, counts, existing, initial_generation, visual_unavailable
-                stage('generating', f'已准备 {count} 组双语草稿；文字约{limits["text"]}组、图片约{limits["visual"]}组')
+                stage('generating', f'已准备 {count} 组双语草稿；文字最多{limits["text"]}组、图片最多{limits["visual"]}组')
                 for mode, goal, fill, groups in generation_phases(text_groups,visual_groups,limits):
                     # Every evidence group takes one turn before any group takes a
                     # second share, so quota is not spent on the opening pages.
                     pending = list(groups)
-                    revisits = {}
                     while pending:
                         group = pending.pop(0)
                         group_ids = {u['id'] for u in group}
                         original_group_ids = set(group_ids)
+                        group_signature = digest([mode,sorted((u['id'],u['hash']) for u in group)])
+                        if group_signature in completed_groups or original_group_ids & previously_used:
+                            continue
                         active_topics = [t for t in doc['topics'] if set(t['unit_ids']) & group_ids]
                         if not active_topics:
                             continue
@@ -1678,15 +1700,15 @@ class Worker:
                         if not group:
                             continue
                         visual_cap = max(2, limits['visual'])
-                        if mode=='visual' and (visual_unavailable or len(visual_attempts)>=visual_cap
+                        if mode=='visual' and (visual_unavailable or len(visual_attempts)+completed_visual>=visual_cap
                                                or frozenset(original_group_ids) in visual_attempts):
                             continue
                         share = max(1, -(-(goal-counts[mode]) // max(1, len(pending)+1)))
                         taken = 0
                         reuse_first = (initial_generation is not None
                                        and original_group_ids==initial_generation['group_ids'])
-                        # Two short requests may cover this evidence group; then move to other pages.
-                        for _ in range(1 if mode=='visual' else 2):
+                        # One request per group; a partial/empty response does not trigger top-ups.
+                        for _ in range(1):
                             remaining = min(goal-counts[mode], limits['maximum']-sum(counts.values()))
                             if fill:
                                 remaining = min(remaining, attainable-sum(counts.values()))
@@ -1767,37 +1789,22 @@ class Worker:
                                 existing.extend(row['input'] for row in rows)
                                 count += 1
                                 counts[mode] += 1
+                            store.event(doc['id'],'generation_group_exhausted',{'signature':group_signature,'mode':mode,'pairs':len(generated)})
+                            completed_groups.add(group_signature)
                             if not generated:
                                 break
                             taken += len(generated)
                             review_candidates(generated,group,previous_questions)
                             stage('generating', f'已准备 {count} 组双语问答：文字 {counts["text"]} 组、图片 {counts["visual"]} 组')
-                        # Ten pairs may outnumber the available evidence groups; a
-                        # group that already delivered gets a second turn rather
-                        # than leaving the document short of its quota.
-                        if mode=='text' and taken and counts[mode]<goal:
-                            key = frozenset(original_group_ids)
-                            revisits[key] = revisits.get(key, 0) + 1
-                            if revisits[key] <= 2:
-                                pending.append(group)
-            # Keep normal generation first; only failed groups enter the repair path.
-            # At most one replacement pass follows; evidence limits still take priority.
-            for delivery_pass in range(2):
-                generate_batches()
-                current = store.document(doc['id'])
-                failed_keys = list(dict.fromkeys(c['pair_id'] for c in current['candidates']
-                                                if c.get('pair_id') and c['status']=='needs_review'))
-                if failed_keys:
-                    if defer_quality():
-                        return
-                    repair_candidates(failed_keys, units)
-                count, existing, counts = ready_state()
-                if count>=attainable or not failed_keys:
-                    break
-                # Failed drafts remain in the uniqueness/audit history; avoid generating them again.
-                with store.connect() as db:
-                    existing += [json.loads(r[0])['input'] for r in db.execute(
-                        "SELECT row_json FROM candidates WHERE document_id=? AND status='discarded'",(doc['id'],))]
+            # Repair existing failed drafts, but never generate replacements to fill a count.
+            generate_batches()
+            current = store.document(doc['id'])
+            failed_keys = list(dict.fromkeys(c['pair_id'] for c in current['candidates']
+                                            if c.get('pair_id') and c['status']=='needs_review'))
+            if failed_keys:
+                if defer_quality():
+                    return
+                repair_candidates(failed_keys, units)
             stage('preflight','校验最终问答的真实证据、审核绑定和入库条件')
             count, existing, counts = ready_state(validate=True)
             save_timing()
@@ -1805,11 +1812,11 @@ class Worker:
             has_candidates = bool(existing)
             store.update_document(doc['id'], status='waiting_review' if has_candidates else 'insufficient',
                                   error='' if count>=config['min_per_document'] else
-                                  (f'仅有 {count} 组双语问答通过审核与入库校验；完整目标 {limits["target"]} 组'
+                                  (f'仅有 {count} 组双语问答通过审核与入库校验；本文件上限 {limits["target"]} 组'
                                    f'（图片按本文件实际图数分配 {limits["visual"]} 组、每图 1 组，'
                                    f'其余 {limits["text"]} 组为文字），'
-                                   f'低于 {config["min_per_document"]} 组按证据不足标注；不合格草稿已保留，不补造。'),
-                                  seconds=seconds, progress=f'{count} 组双语问答已通过审核与入库校验' if has_candidates else '')
+                                   f'少于常见范围起点 {config["min_per_document"]} 组是允许的；不合格草稿已保留，不补题。'),
+                                  seconds=seconds, progress=f'{count} 组双语问答已通过审核与入库校验' if has_candidates else '无审核通过的有效知识点，生成0组，不补题。')
             store.event(doc['id'], 'run_complete', {'run_id':run_id,'seconds':seconds,'timings':timings,'pairs':count,'candidates':len(existing)})
             store.task_update(task['id'],self.name,'waiting_review' if has_candidates else 'insufficient','succeeded')
         except Exception as error:
@@ -1834,8 +1841,7 @@ class Worker:
                         encode({'run_id':run_id,'stage':current_stage,'seconds':round(time.perf_counter()-started,2)}),time.time()))
                 return
             if isinstance(error, NoEvidence):
-                # Retrying cannot help: the model read the file three times and
-                # found nothing a formal topic could cite. Archive it as
+                # A valid empty knowledge verdict is not a retryable failure. Archive it as
                 # insufficient instead of showing a retryable failure.
                 message = str(error)
                 store.event(doc['id'],'run_insufficient',{'run_id':run_id,'stage':current_stage,'reason':message,

@@ -62,10 +62,10 @@ def run(setup):
 def test_five_knowledge_points_are_ten_rows_with_same_number_of_calls(setup_pipeline):
     app,store,doc_id,_,calls,_,_=setup_pipeline
     doc=run(setup_pipeline)
-    assert doc['status']=='waiting_review' and doc['bilingual_count']==5
-    assert len(doc['candidates'])==10 and doc['qa_count']==doc['qa_pair_count']==0
-    assert [k for k,_,_ in calls]==['analysis','generation','review','review','generation','review','review']
-    assert [p['target'] for k,p,_ in calls if k=='generation']==[3,2]
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==3
+    assert len(doc['candidates'])==6 and doc['qa_count']==doc['qa_pair_count']==0
+    assert [k for k,_,_ in calls]==['analysis','generation','review','review']
+    assert [p['target'] for k,p,_ in calls if k=='generation']==[3]
     for pair_id in {c['pair_id'] for c in doc['candidates']}:
         versions=[c for c in doc['candidates'] if c['pair_id']==pair_id]
         assert {c['row']['language'] for c in versions}=={'zh','en'}
@@ -75,17 +75,17 @@ def test_five_knowledge_points_are_ten_rows_with_same_number_of_calls(setup_pipe
     for c in doc['candidates']:
         approve(store,c['id'],True,c['row_hash'])
     assert store.document(doc_id)['status']=='completed'
-    assert store.document(doc_id)['qa_count']==10 and store.document(doc_id)['qa_pair_count']==5
+    assert store.document(doc_id)['qa_count']==6 and store.document(doc_id)['qa_pair_count']==3
     client=TestClient(app)
     all_rows=list(csv.DictReader(io.StringIO(client.get('/api/export').content.decode('utf-8-sig'))))
-    assert len(all_rows)==10 and list(all_rows[0])==FIELDS
+    assert len(all_rows)==6 and list(all_rows[0])==FIELDS
     for language in ('zh','en','zh-en'):
         response=client.get('/api/export',params={'language':language,'document_id':doc_id,'topic_id':doc['topics'][0]['id']})
         rows=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
-        assert len(rows)==10 and {r['language'] for r in rows}=={'zh','en'}
+        assert len(rows)==6 and {r['language'] for r in rows}=={'zh','en'}
         assert 'QA.csv' in response.headers['content-disposition']
     summary=client.get('/api/documents?summary_only=true').json()[0]
-    assert summary['qa_count']==10 and summary['qa_pair_count']==5 and summary['bilingual_count']==5
+    assert summary['qa_count']==6 and summary['qa_pair_count']==3 and summary['bilingual_count']==3
 
 
 @pytest.mark.parametrize('mutation',['nested_en','extra_en_key'])
@@ -103,10 +103,10 @@ def test_complete_answer_in_the_wrong_container_is_repaired(setup_pipeline,mutat
         return dict(result,pairs=pairs)
     behavior['generation']=misplaced
     doc=run(setup_pipeline)
-    assert doc['status']=='waiting_review' and doc['bilingual_count']==5
+    assert doc['status']=='waiting_review' and doc['bilingual_count']==3
     assert all(set(c['row'])==set(FIELDS) for c in doc['candidates'])
     english=[c['row']['input'] for c in doc['candidates'] if c['row']['language']=='en']
-    assert len(english)==5 and all(text.startswith('What was') for text in english)
+    assert len(english)==3 and all(text.startswith('What was') for text in english)
 
 
 def test_response_without_a_recoverable_english_version_is_not_cached():
@@ -215,7 +215,7 @@ def test_pair_rereview_uses_only_its_evidence_and_never_regenerates(setup_pipeli
     assert [k for k,_,_ in calls]==['review','review']
     assert len(calls[0][1]['candidates'])==1 and len(calls[0][1]['candidates'][0]['versions'])==2
     assert len(calls[0][2])==1
-    assert len(store.document(doc_id)['candidates'])==10
+    assert len(store.document(doc_id)['candidates'])==6
 
 
 def test_either_language_duplicate_rolls_back_whole_new_pair(setup_pipeline):
@@ -282,7 +282,7 @@ def test_english_evidence_can_produce_chinese_and_english(setup_pipeline):
     path.write_bytes(text)
     with store.connect() as db:db.execute('UPDATE documents SET content_hash=? WHERE id=?',(hashlib.sha256(text).hexdigest(),doc_id))
     doc=run(setup_pipeline)
-    assert doc['units'][0]['language']=='en' and doc['bilingual_count']==5
+    assert doc['units'][0]['language']=='en' and doc['bilingual_count']==3
     assert {c['row']['language'] for c in doc['candidates']}=={'zh','en'}
 
 

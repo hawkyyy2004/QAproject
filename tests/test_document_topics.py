@@ -89,14 +89,18 @@ def test_alias_reuse_and_coverage_count_real_locations_not_views(tmp_path):
 def test_empty_classification_is_insufficient_not_placeholder(tmp_path, monkeypatch):
     store = Store(tmp_path/'live')
     doc_id, _ = store.import_file('empty-topics.txt', '不应伪造分类。'.encode(), 'live')
-    monkeypatch.setattr(GLMClient, 'call', lambda *a, **kw: ({'summary':'无法归类。', 'topics':[]}, {}))
+    calls=[]
+    def empty(*args,**kwargs):
+        calls.append(1)
+        return {'summary':'无法归类。', 'topics':[]},{}
+    monkeypatch.setattr(GLMClient, 'call', empty)
     worker = Worker(store)
     worker.process(store.claim(worker.name))
     doc = store.document(doc_id)
-    # A file the model reads three times without naming a supportable topic is
-    # archived as insufficient evidence, not left in a retryable failure loop.
+    # A valid zero-knowledge verdict is accepted immediately, without asking again.
+    assert len(calls)==1
     assert doc['status']=='insufficient' and doc['coverage']!='complete'
-    assert '没有可支撑正式主题的实质知识' in doc['error'] and not doc['candidates'] and not doc['topics']
+    assert '生成0组' in doc['error'] and not doc['candidates'] and not doc['topics']
 
 
 def test_failed_analysis_never_publishes_partial_topics_and_resumes_cached_batches(tmp_path, monkeypatch):

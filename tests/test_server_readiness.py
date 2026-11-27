@@ -46,7 +46,7 @@ def test_unconfigured_directory_does_not_scan_or_change_upload_pipeline(tmp_path
     assert Worker(app.state.stores['live']).run_once()  # Shared Corpus preparation.
     assert Worker(app.state.stores['live']).run_once()  # QA consumes the frozen result.
     doc = app.state.stores['live'].document(result['id'])
-    assert doc['bilingual_count']==5 and len(calls)==7
+    assert doc['bilingual_count']==3 and len(calls)==4
     assert not app.state.library.path.exists() and not app.state.library.thread.is_alive()
     assert client.get('/api/originals/'+doc['id']).status_code==200
 
@@ -97,11 +97,11 @@ def test_library_reference_processes_pdf_without_original_copy(tmp_path,monkeypa
     assert Worker(store).run_once()  # Corpus
     assert Worker(store).run_once()  # QA
     doc = store.document(result['id'])
-    assert doc['bilingual_count']==5 and doc['pages']==2 and len(calls)==7, doc['error']
+    assert doc['bilingual_count']==3 and doc['pages']==2 and len(calls)==4, doc['error']
     assert all(c['row']['source'].startswith(str(source)+'|') for c in doc['candidates'])
     assert client.get('/api/originals/'+doc['id']).content==raw
     assert source.read_bytes()==raw
-    assert approve_document(store,doc['id'])['committed_count']==10
+    assert approve_document(store,doc['id'])['committed_count']==6
     assert client.get('/api/library').json()['items'][0]['status']=='completed'
     before = snapshot(store)
     source.write_bytes(b'changed source')
@@ -259,7 +259,7 @@ def test_closing_a_browser_client_does_not_cancel_background_queue(tmp_path,monk
             if all(d['status']=='waiting_review' for d in docs):
                 break
             time.sleep(.03)
-        assert len(docs)==3 and all(d['bilingual_count']==5 for d in docs)
+        assert len(docs)==3 and all(d['bilingual_count']==3 for d in docs)
         assert all(app.state.stores['live'].document(d['id'])['qa_count']==0 for d in result)
 
 
@@ -363,7 +363,7 @@ def test_backup_restore_preserves_rows_hashes_originals_and_revision_history(set
     shutil.move(str(store.root),str(tmp_path/'retained-old-live'))
     assert restore_runtime(saved,root)['restored']==result['files']
     restored = Store(root/'live')
-    assert snapshot(restored)==expected and restored.document(doc)['qa_count']==10
+    assert snapshot(restored)==expected and restored.document(doc)['qa_count']==6
     assert restored.original(doc)[0].is_file()
     with restored.connect() as db:
         assert db.execute('SELECT status FROM qa_revisions').fetchone()[0]=='applied'
